@@ -9,19 +9,6 @@ uses
 
 type
 {$M+}
-  TORMTable = class(TEntityAbstract)
-  strict private
-    FORMUniqueID: string;
-    FTableName: string;
-  public
-    class function GetStructure: TStructure; override;
-  published
-    property ORMUniqueID: string read FORMUniqueID write FORMUniqueID;
-
-    [NotNull]
-    property TableName: string read FTableName write FTableName;
-  end;
-
   TORMField = class(TEntityAbstract)
   strict private
     FFieldName: string;
@@ -30,29 +17,52 @@ type
   public
     class function GetStructure: TStructure; override;
   published
+    [NotNull]
     property FieldName: string read FFieldName write FFieldName;
     property ORMUniqueID: string read FORMUniqueID write FORMUniqueID;
     property TableID: string read FTableID write FTableID;
   end;
+
+  TORMFieldList = class(TEntityListBase<TORMField>);
+
+  TORMTable = class(TEntityAbstract)
+  strict private
+    FORMFields: TORMFieldList;
+    FORMUniqueID: string;
+    FTableName: string;
+    function GetORMFields: TORMFieldList;
+  public
+    function GetORMField(const aORMUniqueID: string): TORMField;
+    class function GetStructure: TStructure; override;
+    property ORMFields: TORMFieldList read GetORMFields;
+  published
+    property ORMUniqueID: string read FORMUniqueID write FORMUniqueID;
+    [NotNull]
+    property TableName: string read FTableName write FTableName;
+  end;
+{$M-}
+
+  THandleEntityFieldProc = reference to procedure(aRttiProperty: TRttiProperty);
 
   TORMService = class
   private
     FDBEngine: TDBEngine;
     FRttiContext: TRttiContext;
     function GetFieldDef(aRttiProperty: TRttiProperty): TFieldDef;
-    function GetORMField(const aORMUniqueID: string): TORMField;
-    function GetORMFieldDef: TTableDef;
+    function GetORMDef(aEntityClass: TEntityClass): TTableDef;
     function GetORMTable(const aORMUniqueID: string): TORMTable;
-    function GetORMTableDef: TTableDef;
     function GetORMUniqueID(aRttiObject: TRttiObject): string;
-    function GetSQLFieldType(aRttiType: TRttiType): string;
-    function GetTableDef(const aStructure: TStructure; aEntityType: TRttiInstanceType): TTableDef;
+    function GetPrimaryKey(aEntityType: TRttiInstanceType): TPrimaryKey;
+    function GetSQLFieldType(aRttiProperty: TRttiProperty): string;
+    function GetTableDef(const aStructure: TStructure; aORMTable: TORMTable;
+      aEntityType: TRttiInstanceType): TTableDef;
     function GetTypesInheritFrom(aClass: TClass): TArray<TRttiInstanceType>;
     function IsAbstract(aRttiObject: TRttiObject): Boolean;
-    function IsAutoincrement(aEntityType: TRttiInstanceType; aRttiProperty: TRttiProperty): Boolean;
     function IsORMEntity(aClass: TClass): Boolean;
     function TryGetStructure(aEntityType: TRttiInstanceType; out aStructure: TStructure): Boolean;
     procedure CreateORMTablesIfNotExist;
+    procedure HandleEntityFields(aEntityProperties: TArray<TRttiProperty>;
+      aHandleEntityFieldProc: THandleEntityFieldProc);
     procedure HandleEntityType(aEntityType: TRttiInstanceType);
     public
     procedure Migrate(aDBEngine: TDBEngine);
@@ -63,6 +73,7 @@ type
 implementation
 
 uses
+  Apollo_Helpers,
   Apollo_ORM_Exception,
   System.Classes,
   System.SysUtils,
@@ -74,13 +85,16 @@ function TORMService.TryGetStructure(aEntityType: TRttiInstanceType; out aStruct
 var
   GetStructureFunc: TRttiMethod;
 begin
+  if IsAbstract(aEntityType) then
+    Exit(False);
+
   Result := True;
   GetStructureFunc := aEntityType.GetMethod('GetStructure');
 
   if not IsAbstract(GetStructureFunc) then
     aStructure := GetStructureFunc.Invoke(aEntityType.MetaclassType, []).AsType<TStructure>
   else
-    Result := False;
+    raise EORMGetStructureIsAbstract.Create(TEntityClass(aEntityType.MetaclassType));
 end;
 
 constructor TORMService.Create;
@@ -90,19 +104,22 @@ end;
 
 procedure TORMService.CreateORMTablesIfNotExist;
 var
-  SQL: string;
+  EntityClass: TEntityClass;
+  EntityClasses: TArray<TEntityClass>;
+  SQLList: TStringList;
 begin
-  if not FDBEngine.TableExists(TORMTable.GetTableName) then
-  begin
-    SQL := FDBEngine.GetCreateTableSQL(GetORMTableDef);
-    FDBEngine.ExecSQL(SQL);
-  end;
+  EntityClasses := [TORMTable, TORMField];
 
-  if not FDBEngine.TableExists(TORMField.GetTableName) then
-  begin
-    SQL := FDBEngine.GetCreateTableSQL(GetORMFieldDef);
-    FDBEngine.ExecSQL(SQL);
-  end;
+  for EntityClass in EntityClasses do
+    if not FDBEngine.TableExists(EntityClass.GetTableName) then
+    begin
+      SQLList := FDBEngine.GetCreateTableSQL(GetORMDef(EntityClass));
+      try
+        FDBEngine.ExecSQL(SQLList.Text);
+      finally
+        SQLList.Free;
+      end;
+    end;
 end;
 
 destructor TORMService.Destroy;
@@ -113,48 +130,39 @@ end;
 
 function TORMService.GetFieldDef(aRttiProperty: TRttiProperty): TFieldDef;
 var
-  CustomAttribute: TCustomAttribute;
+  Attribute: TCustomAttribute;
 begin
   Result.Init;
 
   Result.FieldName := TORMTools.GetFieldNameByPropName(aRttiProperty.Name);
-  Result.SQLType := GetSQLFieldType(aRttiProperty.PropertyType);
+  Result.SQLType := GetSQLFieldType(aRttiProperty);
 
-  for CustomAttribute in aRttiProperty.GetAttributes do
+  for Attribute in aRttiProperty.GetAttributes do
   begin
-    if CustomAttribute is NotNull then
+    if Attribute is NotNull then
       Result.NotNull := True;
+
+    if Attribute is FieldLength then
+      Result.FieldLength := FieldLength(Attribute).Length;
   end;
+
+  if (Result.SQLType = 'VARCHAR') and (Result.FieldLength = 0) then
+    Result.FieldLength := 255;
 end;
 
-function TORMService.GetORMField(const aORMUniqueID: string): TORMField;
-begin
-  Result := TORMField.Create(FDBEngine, [aORMUniqueID]);
-end;
-
-function TORMService.GetORMFieldDef: TTableDef;
+function TORMService.GetORMDef(aEntityClass: TEntityClass): TTableDef;
 var
   RttiInstanceType: TRttiInstanceType;
   Structure: TStructure;
 begin
-  RttiInstanceType := FRttiContext.GetType(TORMField.ClassInfo).AsInstance;
-  Structure := TORMField.GetStructure;
-  Result := GetTableDef(Structure, RttiInstanceType);
+  RttiInstanceType := FRttiContext.GetType(aEntityClass.ClassInfo).AsInstance;
+  Structure := aEntityClass.GetStructure;
+  Result := GetTableDef(Structure, nil, RttiInstanceType);
 end;
 
 function TORMService.GetORMTable(const aORMUniqueID: string): TORMTable;
 begin
   Result := TORMTable.Create(FDBEngine, [aORMUniqueID]);
-end;
-
-function TORMService.GetORMTableDef: TTableDef;
-var
-  RttiInstanceType: TRttiInstanceType;
-  Structure: TStructure;
-begin
-  RttiInstanceType := FRttiContext.GetType(TORMTable.ClassInfo).AsInstance;
-  Structure := TORMTable.GetStructure;
-  Result := GetTableDef(Structure, RttiInstanceType);
 end;
 
 function TORMService.GetORMUniqueID(aRttiObject: TRttiObject): string;
@@ -171,75 +179,92 @@ begin
     end;
 
   if Result.IsEmpty then
-    raise EORMUniqueIDNotExists.Create;
+    raise EORMUniqueIDNotExists.Create(aRttiObject);
 end;
 
-function TORMService.GetSQLFieldType(aRttiType: TRttiType): string;
+function TORMService.GetPrimaryKey(aEntityType: TRttiInstanceType): TPrimaryKey;
+var
+  GetPrimaryKeyFunc: TRttiMethod;
 begin
-  case aRttiType.TypeKind of
+  GetPrimaryKeyFunc := aEntityType.GetMethod('GetPrimaryKey');
+  if not Assigned(GetPrimaryKeyFunc) then
+    EORMPrimaryKeyNotDefined.Create;
+
+  Result := GetPrimaryKeyFunc.Invoke(aEntityType.MetaclassType, []).AsType<TPrimaryKey>;
+end;
+
+function TORMService.GetSQLFieldType(aRttiProperty: TRttiProperty): string;
+var
+  Attribute: TCustomAttribute;
+begin
+  for Attribute in aRttiProperty.GetAttributes do
+    if Attribute is Text then
+      Exit('TEXT');
+
+  case aRttiProperty.PropertyType.TypeKind of
     tkInteger: Result := 'INTEGER';
-    tkString, tkUString: Result:= 'VARCHAR(255)';
+    tkString, tkUString: Result:= 'VARCHAR';
   end;
 end;
 
-function TORMService.GetTableDef(const aStructure: TStructure; aEntityType: TRttiInstanceType): TTableDef;
+function TORMService.GetTableDef(const aStructure: TStructure; aORMTable: TORMTable;
+  aEntityType: TRttiInstanceType): TTableDef;
 var
   FieldDef: TFieldDef;
   FieldName: string;
+  FKey: TFKey;
+  FKeyDef: TFKeyDef;
   KeyField: TKeyField;
   ORMField: TORMField;
-  RttiProperty: TRttiProperty;
+  TableDef: TTableDef;
 begin
-  Result.TableName := aStructure.TableName.ToUpper;
+  TableDef.Init;
 
-  if aEntityType.MetaclassType.InheritsFrom(TEntityFeatID) then
+  if aStructure.TableName.IsEmpty then
+    raise EORMTableNameNotDefined.Create(TEntityClass(aEntityType.MetaclassType));
+
+  TableDef.TableName := aStructure.TableName.ToUpper;
+  if Assigned(aORMTable) then
+    TableDef.OldTableName := aORMTable.TableName;
+
+  for KeyField in GetPrimaryKey(aEntityType) do
   begin
-    Result.PKey.FieldNames := ['ID'];
-    Result.PKey.Autoincrement := True;
-  end
-  else
-  begin
-    Result.PKey.FieldNames := [];
-    for KeyField in aStructure.PrimaryKey do
-    begin
-      FieldName := TORMTools.GetFieldNameByPropName(KeyField.PropName);
-      Result.PKey.FieldNames := Result.PKey.FieldNames + [FieldName];
-    end;
+    FieldName := TORMTools.GetFieldNameByPropName(KeyField.PropName);
+    TableDef.PKey.FieldNames := TableDef.PKey.FieldNames + [FieldName];
+
+    if KeyField.FieldType = TFieldType.ftAutoInc then
+      TableDef.PKey.Autoincrement := True;
   end;
 
-  Result.FieldDefs := [];
-  for RttiProperty in aEntityType.GetProperties do
-  begin
-    if RttiProperty.Visibility <> mvPublished then
-      Continue;
-
-    FieldDef := GetFieldDef(RttiProperty);
-
-    if (IsORMEntity(aEntityType.MetaclassType)) or
-       (IsAutoincrement(aEntityType, RttiProperty))
-    then
+  HandleEntityFields(aEntityType.GetProperties, procedure(aRttiProperty: TRttiProperty)
     begin
-      //do nothing
-    end
-    else
-    begin
-      ORMField := GetORMField(GetORMUniqueID(RttiProperty));
-      try
-        if not ORMField.IsNew then
+      FieldDef := GetFieldDef(aRttiProperty);
+
+      if Assigned(aORMTable) then
+      begin
+        ORMField := aORMTable.GetORMField(GetORMUniqueID(aRttiProperty));
+
+        if Assigned(ORMField) then
           FieldDef.OldFieldName := ORMField.FieldName;
-
-        if ORMField.FieldName <> FieldDef.FieldName then
-        begin
-          ORMField.FieldName := FieldDef.FieldName;
-          ORMField.Store;
-        end;
-      finally
-        ORMField.Free;
       end;
-    end;
 
-    Result.FieldDefs := Result.FieldDefs + [FieldDef];
+      if TableDef.PKey.FieldNames.Contains(FieldDef.FieldName) then
+        FieldDef.NotNull := True;
+
+      TableDef.FieldDefs := TableDef.FieldDefs + [FieldDef];
+    end
+  );
+
+  for FKey in aStructure.FKeys do
+  begin
+    FKeyDef.FieldName := TORMTools.GetFieldNameByPropName(FKey.PropName);
+    FKeyDef.ReferenceTableName := FKey.ReferEntityClass.GetTableName.ToUpper;
+    FKeyDef.ReferenceFieldName := TORMTools.GetFieldNameByPropName(FKey.ReferPropName);
+
+    TableDef.FKeyDefs := TableDef.FKeyDefs + [FKeyDef];
   end;
+
+  Result := TableDef;
 end;
 
 function TORMService.GetTypesInheritFrom(aClass: TClass): TArray<TRttiInstanceType>;
@@ -260,8 +285,23 @@ begin
   end;
 end;
 
+procedure TORMService.HandleEntityFields(aEntityProperties: TArray<TRttiProperty>;
+  aHandleEntityFieldProc: THandleEntityFieldProc);
+var
+  RttiProperty: TRttiProperty;
+begin
+  for RttiProperty in aEntityProperties do
+  begin
+    if RttiProperty.Visibility <> mvPublished then
+      Continue;
+
+    aHandleEntityFieldProc(RttiProperty);
+  end;
+end;
+
 procedure TORMService.HandleEntityType(aEntityType: TRttiInstanceType);
 var
+  ORMField: TORMField;
   ORMTable: TORMTable;
   Structure: TStructure;
   SQL: string;
@@ -270,28 +310,23 @@ var
 begin
   if TryGetStructure(aEntityType, Structure) then
   begin
-    //try find ormtable by guid
-    //if not found, add to ormtable, get create table statment
-    //if found and table name the same, get modify table statment
-    //if found but table name differ, rename table, update ormtable, get modify statement
-
-    {if Structure.TableGUID.IsEmpty then
-      raise Exception.CreateFmt('Entity class %s must specifies GUID in the GetStructure function!', [aEntityType.Name]);
-
-    if Structure.TableName.IsEmpty then
-      raise Exception.CreateFmt('Entity class %s must specifies TableName in the GetStructure function!', [aEntityType.Name]);
-    }
-
-    TableDef := GetTableDef(Structure, aEntityType);
-
     ORMTable := GetORMTable(GetORMUniqueID(aEntityType));
     try
+      TableDef := GetTableDef(Structure, ORMTable, aEntityType);
+
       SQL := '';
       if ORMTable.IsNew then
-        SQL := FDBEngine.GetCreateTableSQL(TableDef)
+      begin
+        SQLList := FDBEngine.GetCreateTableSQL(TableDef);
+        try
+          SQL := SQLList.Text;
+        finally
+          SQLList.Free;
+        end;
+      end
       else
       begin
-        SQLList := FDBEngine.GetModifyTableSQL(ORMTable.TableName, TableDef);
+        SQLList := FDBEngine.GetModifyTableSQL(TableDef);
         try
           if SQLList.Count > 0 then
             SQL := SQLList.Text;
@@ -305,17 +340,26 @@ begin
         FDBEngine.TransactionStart;
         try
           FDBEngine.ExecSQL(SQL);
+
+          ORMTable.TableName := TableDef.TableName;
+          ORMTable.ORMFields.Clear;
+
+          HandleEntityFields(aEntityType.GetProperties, procedure(aRttiProperty: TRttiProperty)
+            begin
+              ORMField := TORMField.Create(FDBEngine);
+              ORMField.FieldName := TORMTools.GetFieldNameByPropName(aRttiProperty.Name);
+              ORMField.ORMUniqueID := GetORMUniqueID(aRttiProperty);
+
+              ORMTable.ORMFields.Add(ORMField);
+            end
+          );
+          ORMTable.StoreAll;
+
           FDBEngine.TransactionCommit;
         except;
           FDBEngine.TransactionRollback;
           raise;
         end;
-      end;
-
-      if ORMTable.TableName <> TableDef.TableName then
-      begin
-        ORMTable.TableName := TableDef.TableName;
-        ORMTable.Store;
       end;
     finally
       ORMTable.Free;
@@ -324,24 +368,18 @@ begin
 end;
 
 function TORMService.IsAbstract(aRttiObject: TRttiObject): Boolean;
-begin
-  Result := PVmtMethodExEntry(aRttiObject.Handle).Flags and (1 shl 7) <> 0;
-end;
-
-function TORMService.IsAutoincrement(aEntityType: TRttiInstanceType; aRttiProperty: TRttiProperty): Boolean;
 var
-  GetPrimaryKeyFunc: TRttiMethod;
-  KeyField: TKeyField;
-  PrimaryKey: TPrimaryKey;
+  CustomAttribute: TCustomAttribute;
 begin
-  Result := False;
-
-  GetPrimaryKeyFunc := aEntityType.GetMethod('GetPrimaryKey');
-  PrimaryKey := GetPrimaryKeyFunc.Invoke(aEntityType.MetaclassType, []).AsType<TPrimaryKey>;
-
-  if PrimaryKey.TryGetKeyField(aRttiProperty.Name, KeyField) then
-    if KeyField.FieldType = TFieldType.ftAutoInc then
-      Exit(True);
+  if (aRttiObject is TRttiInstanceType) then
+  begin
+    Result := False;
+    for CustomAttribute in aRttiObject.GetAttributes do
+      if CustomAttribute is SkipStructure then
+        Exit(True);
+  end
+  else
+    Result := PVmtMethodExEntry(aRttiObject.Handle).Flags and (1 shl 7) <> 0;
 end;
 
 function TORMService.IsORMEntity(aClass: TClass): Boolean;
@@ -373,10 +411,29 @@ end;
 
 { TORMTable }
 
+function TORMTable.GetORMField(const aORMUniqueID: string): TORMField;
+var
+  ORMField: TORMField;
+begin
+  Result := nil;
+
+  for ORMField in GetORMFields do
+    if ORMField.ORMUniqueID = aORMUniqueID then
+      Exit(ORMField);
+end;
+
+function TORMTable.GetORMFields: TORMFieldList;
+begin
+  if not Assigned(FORMFields) then
+    FORMFields := TORMFieldList.Create(Self);
+
+  Result := FORMFields;
+end;
+
 class function TORMTable.GetStructure: TStructure;
 begin
   Result.TableName := 'ORM_TABLE';
-  Result.PrimaryKey.Add('ORMUniqueID', TFieldType.ftString);
+  Result.PrimaryKey.AddField('ORMUniqueID', TFieldType.ftString);
 end;
 
 { TORMField }
@@ -384,7 +441,8 @@ end;
 class function TORMField.GetStructure: TStructure;
 begin
   Result.TableName := 'ORM_FIELD';
-  Result.PrimaryKey.Add('ORMUniqueID', TFieldType.ftString);
+  Result.PrimaryKey.AddField('ORMUniqueID', TFieldType.ftString);
+  Result.PrimaryKey.AddField('TableID', TFieldType.ftString);
   Result.FKeys.Add('TableID', TORMTable, 'ORMUniqueID', rtOne2Many);
 end;
 
