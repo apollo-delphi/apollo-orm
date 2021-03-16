@@ -92,23 +92,25 @@ type
     function GetSelectSQL: string;
     function GetUpdateSQL: string;
     function GetWherePart: string;
-    function PropExists(const aPropName: string): Boolean;
     procedure AssignInstanceFromProps;
     procedure AssignProps;
     procedure AssignPropsFromInstance;
     procedure AssignPropsFromPKeyValues(const aPKeyValues: TArray<Variant>);
     procedure ExecToDB(const aSQL: string);
     procedure FillParam(aParam: TFDParam; const aPropName: string; aValue: Variant);
-    procedure InsertToDB;
     procedure ReadInstance(const aPKeyValues: TArray<Variant>);
     procedure SetProp(const aPropName: string; aValue: Variant);
     procedure UpdateToDB;
+  protected
+    procedure InsertToDB; virtual;
   public
     class function GetPrimaryKey: TPrimaryKey; virtual;
     class function GetStructure: TStructure; virtual; abstract;
     class function GetTableName: string;
     class procedure RegisterForService;
+    function PropExists(const aPropName: string): Boolean;
     procedure Delete;
+    procedure Revert;
     procedure Store;
     procedure StoreAll;
     constructor Create(aDBEngine: TDBEngine); overload;
@@ -134,6 +136,8 @@ type
   TEntityFeatID = class abstract(TEntityAbstract)
   private
     FID: Integer;
+  protected
+    procedure InsertToDB; override;
   public
     class function GetPrimaryKey: TPrimaryKey; override;
     constructor Create(aDBEngine: TDBEngine; const aID: Integer = 0);
@@ -711,7 +715,13 @@ end;
 
 class procedure TEntityAbstract.RegisterForService;
 begin
-//required to call in initialization section if ORM Service will be used
+  //required to call in initialization section if ORM Service will be used
+end;
+
+procedure TEntityAbstract.Revert;
+begin
+  if not FIsNew then
+    AssignPropsFromInstance;
 end;
 
 procedure TEntityAbstract.SetProp(const aPropName: string; aValue: Variant);
@@ -815,6 +825,14 @@ begin
   Result := [KeyField];
 end;
 
+procedure TEntityFeatID.InsertToDB;
+begin
+  inherited;
+
+  ID := FDBEngine.GetLastInsertedID;
+  FInstance.FieldByName('ID').Value := ID;
+end;
+
 { TFKeysHelper }
 
 procedure TFKeysHelper.Add(const aPropName: string;
@@ -899,7 +917,12 @@ var
   Entity: T;
 begin
   for Entity in FRecycleBin do
+  begin
     Entity.Delete;
+    Entity.Free;
+  end;
+
+  FRecycleBin := [];
 end;
 
 procedure TEntityListBase<T>.Clear;
@@ -1046,12 +1069,12 @@ begin
   CleanRecycleBin;
 
   for Entity in Self do
-    begin
-      if Assigned(FOwnerEntity) then
-        Entity.Prop[FFKey.PropName] := FOwnerEntity.Prop[FFKey.ReferPropName];
+  begin
+    if Assigned(FOwnerEntity) then
+      Entity.Prop[FFKey.PropName] := FOwnerEntity.Prop[FFKey.ReferPropName];
 
-      Entity.StoreAll;
-    end;
+    Entity.StoreAll;
+  end;
 end;
 
 { FieldLength }
