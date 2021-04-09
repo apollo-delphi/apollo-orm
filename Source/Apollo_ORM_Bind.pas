@@ -7,19 +7,23 @@ uses
   System.Classes;
 
 type
-  IORMBind = interface
-  ['{27E3AC30-5A47-498C-BFF0-9F644BC312AC}']
-    function GetEntity(aControl: TObject; const aIndex: Integer = 0): TEntityAbstract;
-    procedure Bind(aEntity: TEntityAbstract; aPrefix: string = ''); overload;
-    procedure Bind(aEntity: TEntityAbstract; aControl: TObject; const aIndex: Integer = 0); overload;
-    procedure RemoveBinds(aControl: TObject);
-  end;
-
   TBindItem = record
     Control: TObject;
     Entity: TEntityAbstract;
     Index: Integer;
     PropName: string;
+  end;
+
+  IORMBind = interface
+  ['{27E3AC30-5A47-498C-BFF0-9F644BC312AC}']
+    function GetBindItems(aEntity: TEntityAbstract): TArray<TBindItem>;
+    function GetEntity(aControl: TObject; const aIndex: Integer = 0): TEntityAbstract;
+    function TryGetFirstBindItem(aEntity: TEntityAbstract; out aBindItem: TBindItem): Boolean;
+    procedure Bind(aEntity: TEntityAbstract; aPrefix: string = ''); overload;
+    procedure Bind(aEntity: TEntityAbstract; aControl: TObject; const aIndex: Integer = 0); overload;
+    procedure RemoveBinds(aControl: TObject);
+    property BindItems[aEntity: TEntityAbstract]: TArray<TBindItem> read GetBindItems;
+    property Entity[aControl: TObject; const aIndex: Integer = 0]: TEntityAbstract read GetEntity;
   end;
 
   TORMBind = class abstract(TInterfacedObject, IORMBind)
@@ -29,7 +33,9 @@ type
     procedure AddBindItem(aControl: TObject; aEntity: TEntityAbstract;
       const aIndex: Integer; const aPropName: string);
   private
+    function GetBindItems(aEntity: TEntityAbstract): TArray<TBindItem>;
     function GetEntity(aControl: TObject; const aIndex: Integer = 0): TEntityAbstract;
+    function TryGetFirstBindItem(aEntity: TEntityAbstract; out aBindItem: TBindItem): Boolean;
     procedure Bind(aEntity: TEntityAbstract; aPrefix: string = ''); overload;
     procedure Bind(aEntity: TEntityAbstract; aControl: TObject; const aIndex: Integer = 0); overload;
     procedure RemoveBinds(aControl: TObject);
@@ -39,7 +45,7 @@ type
     procedure SetControlProps(aControl: TComponent; aValue: Variant; aNotifyEvent: TNotifyEvent); virtual; abstract;
     procedure PropControlChange(Sender: TObject); virtual; abstract;
   public
-    constructor Create(aOwner: TComponent);
+    constructor Create(aOwner: TComponent); virtual;
   end;
 
 implementation
@@ -110,6 +116,17 @@ begin
     end;
 end;
 
+function TORMBind.GetBindItems(aEntity: TEntityAbstract): TArray<TBindItem>;
+var
+  BindItem: TBindItem;
+begin
+  Result := [];
+
+  for BindItem in FBindItems do
+    if BindItem.Entity = aEntity then
+      Result := Result + [BindItem];
+end;
+
 function TORMBind.GetEntity(aControl: TObject;
   const aIndex: Integer): TEntityAbstract;
 var
@@ -119,6 +136,20 @@ begin
     Result := BindItem.Entity
   else
     Result := nil;
+end;
+
+function TORMBind.TryGetFirstBindItem(aEntity: TEntityAbstract; out aBindItem: TBindItem): Boolean;
+var
+  BindItem: TBindItem;
+begin
+  Result := False;
+
+  for BindItem in FBindItems do
+    if BindItem.Entity = aEntity then
+    begin
+      aBindItem := BindItem;
+      Exit(True);
+    end;
 end;
 
 function TORMBind.GetPropNameByComponent(aComponent: TComponent;

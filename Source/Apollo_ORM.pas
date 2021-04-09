@@ -3,11 +3,13 @@ unit Apollo_ORM;
 interface
 
 uses
+  Apollo_Binding_Core,
   Apollo_DB_Core,
   Apollo_Types,
   Data.DB,
   FireDAC.Comp.Client,
   FireDAC.Stan.Param,
+  System.Classes,
   System.Generics.Collections;
 
 type
@@ -34,13 +36,15 @@ type
     ReferEntityClass: TEntityClass;
     ReferPropName: string;
     RelType: TRelType;
+    PropNameForJoinedEntity: string;
   end;
 
   TFKeys = TArray<TFKey>;
 
   TFKeysHelper = record helper for TFKeys
     procedure Add(const aPropName: string; aReferEntityClass: TEntityClass;
-      const aReferPropName: string; aRelType: TRelType = rtUnknown);
+      const aReferPropName: string; aRelType: TRelType = rtUnknown; 
+      aPropNameForJoinedEntity: string = '');
     function Contains(const aPropName: string): Boolean;
   end;
 
@@ -72,11 +76,15 @@ type
       out aPropName: string): Boolean; static;
   end;
 
+  TForEachJoinedEntityProc = procedure(aJoinedEntity: TEntityAbstract;
+    aEntityClass: TEntityClass; const aKeyPropName, aEntityPropName, aReferPropName: string) of object;
+
 {$M+}
-  TEntityAbstract = class abstract
+  TEntityAbstract = class abstract(TIntefacedObjectNotUsingReference, ISourceFreeNotification)
   private
     FDBEngine: TDBEngine;
     FFreeListProcs: TSimpleMethods;
+    FFreeNotifications: TNotifyEvents;
     FInstance: TInstance;
     FIsNew: Boolean;
     FStoreListProcs: TSimpleMethods;
@@ -96,12 +104,24 @@ type
     procedure AssignProps;
     procedure AssignPropsFromInstance;
     procedure AssignPropsFromPKeyValues(const aPKeyValues: TArray<Variant>);
+    procedure CreateJoinedEntity(aJoinedEntity: TEntityAbstract;
+      aEntityClass: TEntityClass; const aKeyPropName, aEntityPropName, aReferPropName: string);
     procedure ExecToDB(const aSQL: string);
     procedure FillParam(aParam: TFDParam; const aPropName: string; aValue: Variant);
+    procedure ForEachJoinedChildProp(aForEachJoinedEntityProc: TForEachJoinedEntityProc);
+    procedure ForEachJoinedParentProp(aForEachJoinedEntityProc: TForEachJoinedEntityProc);
+    procedure FreeJoinedEntity(aJoinedEntity: TEntityAbstract;
+      aEntityClass: TEntityClass; const aKeyPropName, aEntityPropName, aReferPropName: string);    
     procedure ReadInstance(const aPKeyValues: TArray<Variant>);
     procedure SetProp(const aPropName: string; aValue: Variant);
+    procedure StoreJoinedChildEnt(aJoinedEntity: TEntityAbstract;
+      aEntityClass: TEntityClass; const aKeyPropName, aEntityPropName, aReferPropName: string);
+    procedure StoreJoinedParentEnt(aJoinedEntity: TEntityAbstract;
+      aEntityClass: TEntityClass; const aKeyPropName, aEntityPropName, aReferPropName: string);    
     procedure UpdateToDB;
   protected
+    procedure AfterCreate; virtual;
+    procedure BeforeDestroy; virtual;
     procedure InsertToDB; virtual;
   public
     class function GetPrimaryKey: TPrimaryKey; virtual;
@@ -109,6 +129,7 @@ type
     class function GetTableName: string;
     class procedure RegisterForService;
     function PropExists(const aPropName: string): Boolean;
+    procedure AddFreeNotify(aNotifyEvent: TNotifyEvent);
     procedure Delete;
     procedure Revert;
     procedure Store;
@@ -120,6 +141,7 @@ type
     property IsNew: Boolean read FIsNew;
     property Prop[const aPropName: string]: Variant read GetProp write SetProp;
   end;
+{$M-}
 
   SkipStructure = class(TCustomAttribute)
   end;
@@ -132,6 +154,7 @@ type
     property UniqueID: string read FUniqueID;
   end;
 
+{$M+}
   [SkipStructure]
   TEntityFeatID = class abstract(TEntityAbstract)
   private
@@ -167,24 +190,42 @@ type
       const aParamValues: TArray<Variant>): TFilter; static;
   end;
 
+  TOrderItem = record
+    IsDESC: Boolean;
+    PropName: string;
+  end;
+
+  POrder = ^TOrder;
+  TOrder = record
+  private
+    FOrderItems: TArray<TOrderItem>;
+  public
+    class function New: TOrder; static;
+    function Add(const aPropName: string): POrder;
+    function AddDESC(const aPropName: string): POrder;
+  end;
+
   TEntityListBase<T: TEntityAbstract> = class(TEntityListAbstract<T>)
   private
     FDBEngine: TDBEngine;
     FFKey: TFKey;
     FOwnerEntity: TEntityAbstract;
     FRecycleBin: TArray<T>;
-    function GetSelectSQL(const aFilter: TFilter): string;
+    function GetSelectSQL(const aFilter: TFilter; const aOrder: POrder): string;
     procedure CleanRecycleBin;
-    procedure FillList(const aFilter: TFilter);
+    procedure FillList(const aFilter: TFilter; const aOrder: POrder);
   public
     procedure Clear;
     procedure Remove(const aEntity: T); overload;
     procedure Remove(const aIndex: Integer); overload;
     procedure Store;
     constructor Create(aDBEngine: TDBEngine; const aFilter: TFilter;
-      const aOrderBy: string = ''); overload;
+      const aOrderBy: POrder = nil); overload;
     constructor Create(aOwnerEntity: TEntityAbstract); overload;
     destructor Destroy; override;
+  end;
+
+  Index = class(TCustomAttribute)
   end;
 
   NotNull = class(TCustomAttribute)
@@ -207,7 +248,6 @@ uses
   Apollo_Helpers,
   Apollo_ORM_Exception,
   System.Character,
-  System.Classes,
   System.SysUtils,
   System.TypInfo,
   System.Variants;
@@ -283,6 +323,10 @@ end;
 
 { TEntityAbstract }
 
+procedure TEntityAbstract.AfterCreate;
+begin
+end;
+
 procedure TEntityAbstract.AssignInstanceFromProps;
 var
   i: Integer;
@@ -302,6 +346,8 @@ end;
 procedure TEntityAbstract.AssignProps;
 begin
   AssignPropsFromInstance;
+  ForEachJoinedParentProp(CreateJoinedEntity);
+  ForEachJoinedChildProp(CreateJoinedEntity);
 end;
 
 procedure TEntityAbstract.AssignPropsFromInstance;
@@ -342,6 +388,11 @@ begin
   end;
 end;
 
+procedure TEntityAbstract.BeforeDestroy;
+begin
+  FFreeNotifications.Exec;
+end;
+
 constructor TEntityAbstract.Create(aDBEngine: TDBEngine; const aInstance: TInstance);
 begin
   FDBEngine := aDBEngine;
@@ -349,6 +400,7 @@ begin
   FIsNew := False;
 
   AssignProps;
+  AfterCreate;
 end;
 
 constructor TEntityAbstract.Create(aDBEngine: TDBEngine);
@@ -357,6 +409,7 @@ var
 begin
   PKeyValues := [];
   Create(aDBEngine, PKeyValues);
+  AfterCreate;
 end;
 
 constructor TEntityAbstract.Create(aDBEngine: TDBEngine;
@@ -374,6 +427,53 @@ begin
   end
   else
     FIsNew := True;
+
+  AfterCreate;
+end;
+
+procedure TEntityAbstract.CreateJoinedEntity(aJoinedEntity: TEntityAbstract;
+  aEntityClass: TEntityClass; const aKeyPropName, aEntityPropName, aReferPropName: string);
+var
+  dsQuery: TFDQuery;
+  Instance: TInstance;
+  KeyValue: Variant;
+  SQL: string;
+begin
+  if aJoinedEntity <> nil then
+    Exit;
+
+  KeyValue := Prop[aKeyPropName];
+
+  if (VarToStr(KeyValue) <> '') and
+     (VarToStr(KeyValue) <> '0')
+  then
+  begin
+    SQL := 'SELECT * FROM %s WHERE %s = :%s';
+    SQL := Format(SQL, [
+      aEntityClass.GetTableName,
+      TORMTools.GetFieldNameByPropName(aReferPropName),
+      aReferPropName
+    ]);
+
+    dsQuery := TFDQuery.Create(nil);
+    try
+      dsQuery.SQL.Text := SQL;
+      dsQuery.ParamByName(aReferPropName).Value := KeyValue;
+
+      FDBEngine.OpenQuery(dsQuery);
+
+      if not dsQuery.IsEmpty then
+      begin
+        Instance := TORMTools.GetInstance(dsQuery);
+
+        aJoinedEntity := aEntityClass.Create(FDBEngine, Instance);
+
+        SetObjectProp(Self, aEntityPropName, aJoinedEntity);
+      end;
+    finally
+      dsQuery.Free;
+    end;
+  end;
 end;
 
 procedure TEntityAbstract.Delete;
@@ -390,6 +490,10 @@ end;
 
 destructor TEntityAbstract.Destroy;
 begin
+  BeforeDestroy;
+
+  ForEachJoinedParentProp(FreeJoinedEntity);
+  ForEachJoinedChildProp(FreeJoinedEntity);
   FFreeListProcs.Exec;
 
   inherited;
@@ -479,6 +583,111 @@ begin
   else
     aParam.AsString := aValue;
   end;
+end;
+
+procedure TEntityAbstract.ForEachJoinedChildProp(
+  aForEachJoinedEntityProc: TForEachJoinedEntityProc);
+var
+  Entity: TEntityAbstract;
+  EntityClass: TEntityClass;
+  FKey: TFKey;
+  FKeys: TFKeys;
+  i: Integer;
+  PropCount: Integer;
+  PropClass: TClass;
+  PropList: PPropList;
+  PropName: string;
+begin
+  PropCount := GetPropList(Self, PropList);
+  try
+    for i := 0 to PropCount - 1 do
+    begin
+      if PropList^[i].PropType^.Kind = tkClass then
+      begin
+        PropClass := GetObjectPropClass(Self, PropList^[i]);
+
+        if PropClass.InheritsFrom(TEntityAbstract) then
+        begin
+          EntityClass := TEntityClass(PropClass);
+          FKeys := EntityClass.GetStructure.FKeys;
+
+          for FKey in FKeys do
+            if (Self.ClassType = FKey.ReferEntityClass) and
+               (FKey.RelType <> rtOne2Many)
+            then
+            begin
+              PropName := GetPropName(PropList^[i]);
+              Entity := GetObjectProp(Self, PropName) as EntityClass;
+
+              aForEachJoinedEntityProc(
+                Entity,
+                EntityClass,
+                FKey.PropName,
+                PropName,
+                FKey.ReferPropName
+              );
+            end;
+        end;
+      end;
+    end;
+  finally
+    FreeMem(PropList);
+  end;
+end;
+
+procedure TEntityAbstract.ForEachJoinedParentProp(
+  aForEachJoinedEntityProc: TForEachJoinedEntityProc);
+var
+  Entity: TEntityAbstract;
+  FKey: TFKey;
+  FKeys: TFKeys;
+  i: Integer;
+  PropCount: Integer;
+  PropClass: TClass;
+  PropList: PPropList;
+  PropName: string;
+begin
+  PropCount := GetPropList(Self, PropList);
+  try
+    FKeys := GetStructure.FKeys;
+
+    for FKey in FKeys do
+    begin
+      if FKey.RelType = rtOne2Many then
+        Continue;
+
+      for i := 0 to PropCount - 1 do
+      begin
+        PropClass := GetObjectPropClass(Self, PropList^[i]);
+        PropName := GetPropName(PropList^[i]);
+
+        if (FKey.ReferEntityClass = PropClass) and
+           ((FKey.PropNameForJoinedEntity = PropName) or FKey.PropNameForJoinedEntity.IsEmpty)
+        then
+        begin
+          Entity := GetObjectProp(Self, PropName) as FKey.ReferEntityClass;
+
+          aForEachJoinedEntityProc(
+            Entity,
+            FKey.ReferEntityClass,
+            FKey.PropName,
+            PropName,
+            FKey.ReferPropName
+          );
+        end;
+      end;
+    end;
+  finally
+    FreeMem(PropList);
+  end;
+end;
+
+procedure TEntityAbstract.FreeJoinedEntity(aJoinedEntity: TEntityAbstract;
+  aEntityClass: TEntityClass; const aKeyPropName, aEntityPropName,
+  aReferPropName: string);
+begin
+  if Assigned(aJoinedEntity) then
+    FreeAndNil(aJoinedEntity);
 end;
 
 function TEntityAbstract.GetDeleteSQL: string;
@@ -742,8 +951,38 @@ end;
 
 procedure TEntityAbstract.StoreAll;
 begin
+  ForEachJoinedParentProp(StoreJoinedParentEnt);
   Store;
-  FStoreListProcs.Exec;
+  ForEachJoinedChildProp(StoreJoinedChildEnt);
+  FStoreListProcs.Exec;  
+end;
+
+procedure TEntityAbstract.StoreJoinedChildEnt(aJoinedEntity: TEntityAbstract;
+  aEntityClass: TEntityClass; const aKeyPropName, aEntityPropName,
+  aReferPropName: string);
+begin
+  if not Assigned(aJoinedEntity) then
+    Exit;
+
+  aJoinedEntity.Prop[aReferPropName] := Prop[aKeyPropName];
+  aJoinedEntity.StoreAll;
+end;
+
+procedure TEntityAbstract.StoreJoinedParentEnt(aJoinedEntity: TEntityAbstract;
+  aEntityClass: TEntityClass; const aKeyPropName, aEntityPropName,
+  aReferPropName: string);
+begin
+  if not Assigned(aJoinedEntity) then
+    Exit;
+
+  aJoinedEntity.StoreAll;
+  Prop[aKeyPropName] := aJoinedEntity.Prop[aReferPropName];
+end;
+
+procedure TEntityAbstract.AddFreeNotify(
+  aNotifyEvent: TNotifyEvent);
+begin
+  FFreeNotifications.Add(Self, aNotifyEvent);
 end;
 
 procedure TEntityAbstract.UpdateToDB;
@@ -836,7 +1075,8 @@ end;
 { TFKeysHelper }
 
 procedure TFKeysHelper.Add(const aPropName: string;
-  aReferEntityClass: TEntityClass; const aReferPropName: string; aRelType: TRelType);
+  aReferEntityClass: TEntityClass; const aReferPropName: string; aRelType: TRelType;
+  aPropNameForJoinedEntity: string);
 var
   FKey: TFKey;
 begin
@@ -844,6 +1084,7 @@ begin
   FKey.ReferEntityClass := aReferEntityClass;
   FKey.ReferPropName := aReferPropName;
   FKey.RelType := aRelType;
+  FKey.PropNameForJoinedEntity := aPropNameForJoinedEntity;
 
   Self := Self + [FKey];
 end;
@@ -904,22 +1145,22 @@ end;
 { TEntityListBase<T> }
 
 constructor TEntityListBase<T>.Create(aDBEngine: TDBEngine; const aFilter: TFilter;
-  const aOrderBy: string);
+  const aOrderBy: POrder);
 begin
   inherited Create(True);
 
   FDBEngine := aDBEngine;
-  FillList(aFilter);
+  FillList(aFilter, aOrderBy);
 end;
 
 procedure TEntityListBase<T>.CleanRecycleBin;
 var
-  Entity: T;
+  i: Integer;
 begin
-  for Entity in FRecycleBin do
+  for i := 0 to Length(FRecycleBin) - 1 do
   begin
-    Entity.Delete;
-    Entity.Free;
+    FRecycleBin[i].Delete;
+    FreeAndNil(FRecycleBin[i]);
   end;
 
   FRecycleBin := [];
@@ -986,7 +1227,7 @@ begin
   inherited;
 end;
 
-procedure TEntityListBase<T>.FillList(const aFilter: TFilter);
+procedure TEntityListBase<T>.FillList(const aFilter: TFilter; const aOrder: POrder);
 var
   dsQuery: TFDQuery;
   Entity: TEntityAbstract;
@@ -994,7 +1235,7 @@ var
   Instance: TInstance;
   SQL: string;
 begin
-  SQL := GetSelectSQL(aFilter);
+  SQL := GetSelectSQL(aFilter, aOrder);
 
   if SQL.IsEmpty then
     Exit;
@@ -1025,10 +1266,11 @@ begin
   end;
 end;
 
-function TEntityListBase<T>.GetSelectSQL(const aFilter: TFilter): string;
+function TEntityListBase<T>.GetSelectSQL(const aFilter: TFilter; const aOrder: POrder): string;
 var
   FromPart: string;
   i: Integer;
+  OrderItem: TOrderItem;
   OrderPart: string;
   WherePart: string;
 begin
@@ -1040,6 +1282,20 @@ begin
     fmUnknown: Exit('');
     fmGetAll: WherePart := '';
     fmGetWhere: WherePart := ' WHERE ' + aFilter.FWhereString;
+  end;
+
+  if Assigned(aOrder) and (Length(aOrder.FOrderItems) > 0) then
+  begin
+    OrderPart := ' ORDER BY';
+    for i := Low(aOrder.FOrderItems) to High(aOrder.FOrderItems) do
+    begin
+      if i > 0 then
+        OrderPart := OrderPart + ',';
+      OrderItem := aOrder.FOrderItems[i];
+      OrderPart := OrderPart + Format(' %s', [TORMTools.GetFieldNameByPropName(OrderItem.PropName)]);
+      if OrderItem.IsDESC then
+        OrderPart := OrderPart + ' DESC';
+    end;
   end;
 
   Result := 'SELECT * FROM %s%s%s';
@@ -1082,6 +1338,40 @@ end;
 constructor FieldLength.Create(const aLength: Integer);
 begin
   FLength := aLength;
+end;
+
+{ TOrder }
+
+function TOrder.Add(const aPropName: string): POrder;
+var
+  OrderItem: TOrderItem;
+begin
+  OrderItem.IsDESC := False;
+  OrderItem.PropName := aPropName;
+
+  FOrderItems := FOrderItems + [OrderItem];
+
+  Result := @Self;
+end;
+
+function TOrder.AddDESC(const aPropName: string): POrder;
+var
+  OrderItem: TOrderItem;
+begin
+  OrderItem.IsDESC := True;
+  OrderItem.PropName := aPropName;
+
+  FOrderItems := FOrderItems + [OrderItem];
+
+  Result := @Self;
+end;
+
+class function TOrder.New: TOrder;
+var
+  Order: TOrder;
+begin
+  Order.FOrderItems := [];
+  Result := Order;
 end;
 
 end.

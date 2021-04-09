@@ -59,6 +59,7 @@ type
     function GetTypesInheritFrom(aClass: TClass): TArray<TRttiInstanceType>;
     function IsAbstract(aRttiObject: TRttiObject): Boolean;
     function IsORMEntity(aClass: TClass): Boolean;
+    function TryGetIndexDef(aRttiProperty: TRttiProperty; out aIndexDef: TIndexDef): Boolean;
     function TryGetStructure(aEntityType: TRttiInstanceType; out aStructure: TStructure): Boolean;
     procedure CreateORMTablesIfNotExist;
     procedure HandleEntityFields(aEntityProperties: TArray<TRttiProperty>;
@@ -150,6 +151,21 @@ begin
     Result.FieldLength := 255;
 end;
 
+function TORMService.TryGetIndexDef(aRttiProperty: TRttiProperty; out aIndexDef: TIndexDef): Boolean;
+var
+  Attribute: TCustomAttribute;
+begin
+  Result := False;
+
+  for Attribute in aRttiProperty.GetAttributes do
+    if Attribute is Index then
+    begin
+      aIndexDef.IndexName := '';
+      aIndexDef.FieldNames := [TORMTools.GetFieldNameByPropName(aRttiProperty.Name)];
+      Result := True;
+    end;
+end;
+
 function TORMService.GetORMDef(aEntityClass: TEntityClass): TTableDef;
 var
   RttiInstanceType: TRttiInstanceType;
@@ -237,6 +253,8 @@ begin
   end;
 
   HandleEntityFields(aEntityType.GetProperties, procedure(aRttiProperty: TRttiProperty)
+    var
+      IndexDef: TIndexDef;
     begin
       FieldDef := GetFieldDef(aRttiProperty);
 
@@ -252,6 +270,9 @@ begin
         FieldDef.NotNull := True;
 
       TableDef.FieldDefs := TableDef.FieldDefs + [FieldDef];
+
+      if TryGetIndexDef(aRttiProperty, IndexDef) then
+        TableDef.IndexDefs := TableDef.IndexDefs + [IndexDef];
     end
   );
 
@@ -292,7 +313,9 @@ var
 begin
   for RttiProperty in aEntityProperties do
   begin
-    if RttiProperty.Visibility <> mvPublished then
+    if (RttiProperty.Visibility <> mvPublished) or
+       (RttiProperty.PropertyType.IsInstance)
+    then
       Continue;
 
     aHandleEntityFieldProc(RttiProperty);
