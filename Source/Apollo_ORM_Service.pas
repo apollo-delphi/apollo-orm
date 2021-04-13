@@ -272,7 +272,10 @@ begin
       TableDef.FieldDefs := TableDef.FieldDefs + [FieldDef];
 
       if TryGetIndexDef(aRttiProperty, IndexDef) then
+      begin
+        IndexDef.IndexName := 'IDX_' + TStringTools.GetHash16(TableDef.TableName + IndexDef.FieldNames.CommaText);
         TableDef.IndexDefs := TableDef.IndexDefs + [IndexDef];
+      end;
     end
   );
 
