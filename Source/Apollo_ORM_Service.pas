@@ -281,6 +281,7 @@ begin
 
   for FKey in aStructure.FKeys do
   begin
+    FKeyDef.TableName := TableDef.TableName;
     FKeyDef.FieldName := TORMTools.GetFieldNameByPropName(FKey.PropName);
     FKeyDef.ReferenceTableName := FKey.ReferEntityClass.GetTableName.ToUpper;
     FKeyDef.ReferenceFieldName := TORMTools.GetFieldNameByPropName(FKey.ReferPropName);
