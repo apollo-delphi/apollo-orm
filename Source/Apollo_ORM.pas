@@ -3,7 +3,6 @@ unit Apollo_ORM;
 interface
 
 uses
-  Apollo_Binding_Core,
   Apollo_DB_Core,
   Apollo_Types,
   Data.DB,
