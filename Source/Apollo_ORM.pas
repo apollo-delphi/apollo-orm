@@ -120,6 +120,7 @@ type
     procedure UpdateToDB;
   protected
     procedure AfterCreate; virtual;
+    procedure BeforeDelete; virtual;
     procedure BeforeDestroy; virtual;
     procedure InsertToDB; virtual;
   public
@@ -387,6 +388,10 @@ begin
   end;
 end;
 
+procedure TEntityAbstract.BeforeDelete;
+begin
+end;
+
 procedure TEntityAbstract.BeforeDestroy;
 begin
   FFreeNotifications.Exec;
@@ -479,6 +484,8 @@ procedure TEntityAbstract.Delete;
 var
   SQL: string;
 begin
+  BeforeDelete;
+
   if not FIsNew then
   begin
     SQL := GetDeleteSQL;
@@ -563,11 +570,11 @@ begin
   case FieldType of
     ftFloat, ftInteger, ftSmallint, ftAutoInc, ftCurrency:
     begin
-      {if (aValue = 0) and
-         (GetStructure.FKeys.Contains(aFieldName))
+      if (aValue = 0) and
+         (GetStructure.FKeys.Contains(aPropName))
       then
         aParam.Clear
-      else}
+      else
         aParam.AsFloat := aValue;
     end;
     ftDateTime: aParam.AsDateTime := aValue;
