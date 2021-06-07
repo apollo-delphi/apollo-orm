@@ -217,6 +217,11 @@ begin
     if Attribute is Text then
       Exit('TEXT');
 
+  if (aRttiProperty.PropertyType.IsInstance) and
+     (aRttiProperty.PropertyType.AsInstance.MetaclassType = TORMBlob)
+  then
+    Exit('BLOB');
+
   case aRttiProperty.PropertyType.TypeKind of
     tkInteger: Result := 'INTEGER';
     tkString, tkUString: Result:= 'VARCHAR';
@@ -318,7 +323,7 @@ begin
   for RttiProperty in aEntityProperties do
   begin
     if (RttiProperty.Visibility <> mvPublished) or
-       (RttiProperty.PropertyType.IsInstance)
+       (RttiProperty.PropertyType.IsInstance and (RttiProperty.PropertyType.AsInstance.MetaclassType <> TORMBlob))
     then
       Continue;
 
