@@ -90,14 +90,17 @@ type
     FInstanceStream: TStream;
     FModifiedStream: TStream;
     function GetStream: TStream;
+    procedure FreeModifiedStream;
     procedure FreeStreams;
     procedure MoveModifiedToInstance;
+    procedure SetStream(aStream: TStream);
   public
     function IsModified: Boolean;
     procedure LoadFromFile(const aFilePath: string);
+    procedure LoadFromStream(aSourceStream: TStream);
     constructor Create(aBlobStream: TStream);
     destructor Destroy; override;
-    property Stream: TStream read GetStream;
+    property Stream: TStream read GetStream write SetStream;
   end;
 
   TForEachJoinedEntityProc = procedure(aJoinedEntity: TEntityAbstract;
@@ -271,6 +274,7 @@ type
     procedure Clear;
     procedure Delete(const aEntity: T); overload;
     procedure Delete(const aIndex: Integer); overload;
+    procedure DeleteAll;
     procedure Remove(const aEntity: T); overload;
     procedure Remove(const aIndex: Integer); overload;
     procedure Revert;
@@ -946,8 +950,10 @@ begin
   begin
     PropName := TORMTools.GetPropNameByFieldName(InstanceField.FieldName);
 
-    if (PropExists(PropName)) and
-       (GetNormInstanceFieldValue(InstanceField) <> GetNormPropValue(PropName))
+    if (PropExists(PropName)) and (
+        (GetNormInstanceFieldValue(InstanceField) <> GetNormPropValue(PropName)) or
+        ((InstanceField.FieldType = ftBlob) and GetBlobProp(PropName).IsModified)
+       )
     then
     begin
       if i > 0 then
@@ -1417,6 +1423,12 @@ begin
   inherited Remove(Items[aIndex]);
 end;
 
+procedure TEntityListBase<T>.DeleteAll;
+begin
+  Clear;
+  Store;
+end;
+
 procedure TEntityListBase<T>.Delete(const aEntity: T);
 begin
   aEntity.Delete;
@@ -1613,11 +1625,16 @@ begin
   inherited;
 end;
 
+procedure TORMBlob.FreeModifiedStream;
+begin
+  if Assigned(FModifiedStream) then
+    FreeAndNil(FModifiedStream);
+end;
+
 procedure TORMBlob.FreeStreams;
 begin
   FInstanceStream.Free;
-  if Assigned(FModifiedStream) then
-    FModifiedStream.Free;
+  FreeModifiedStream;
 end;
 
 function TORMBlob.GetStream: TStream;
@@ -1632,12 +1649,20 @@ end;
 
 function TORMBlob.IsModified: Boolean;
 begin
-  Result := Assigned(FModifiedStream);
+  Result := Assigned(FModifiedStream) and (FModifiedStream.Size > 0);
 end;
 
 procedure TORMBlob.LoadFromFile(const aFilePath: string);
 begin
+  FreeModifiedStream;
   FModifiedStream := TFileTools.CreateFileStream(aFilePath);
+end;
+
+procedure TORMBlob.LoadFromStream(aSourceStream: TStream);
+begin
+  FreeModifiedStream;
+  FModifiedStream := TMemoryStream.Create;
+  FModifiedStream.CopyFrom(aSourceStream, aSourceStream.Size);
 end;
 
 procedure TORMBlob.MoveModifiedToInstance;
@@ -1649,6 +1674,12 @@ begin
   FInstanceStream := FModifiedStream;
 
   FModifiedStream := nil;
+end;
+
+procedure TORMBlob.SetStream(aStream: TStream);
+begin
+  FreeModifiedStream;
+  FModifiedStream := aStream;
 end;
 
 { TQueryKeeper }
