@@ -35,16 +35,15 @@ type
     ReferEntityClass: TEntityClass;
     ReferPropName: string;
     RelType: TRelType;
-    PropNameForJoinedEntity: string;
   end;
 
   TFKeys = TArray<TFKey>;
 
   TFKeysHelper = record helper for TFKeys
     procedure Add(const aPropName: string; aReferEntityClass: TEntityClass;
-      const aReferPropName: string; aRelType: TRelType = rtUnknown;
-      aPropNameForJoinedEntity: string = '');
+      const aReferPropName: string; aRelType: TRelType = rtUnknown);
     function Contains(const aPropName: string): Boolean;
+    function TryGetFKey(const aPropName: string; out aFKey: TFKey): Boolean;
   end;
 
   TStructure = record
@@ -103,9 +102,6 @@ type
     property Stream: TStream read GetStream write SetStream;
   end;
 
-  TForEachJoinedEntityProc = procedure(aJoinedEntity: TEntityAbstract;
-    aEntityClass: TEntityClass; const aKeyPropName, aEntityPropName, aReferPropName: string) of object;
-
   TForEachBlobProp = reference to procedure(aBlob: TORMBlob);
 
 {$M+}
@@ -116,8 +112,12 @@ type
     FFreeNotifications: TNotifyEvents;
     FInstance: TInstance;
     FIsNew: Boolean;
+    FJoinedEntities: TObjectList<TEntityAbstract>;
+    FOwnedAsJoined: Boolean;
     FRevertListProcs: TSimpleMethods;
     FStoreListProcs: TSimpleMethods;
+    function CreateJoinedEntity(aEntityClass: TEntityClass; const aKeyPropName,
+      aReferPropName: string): TEntityAbstract;
     function GetBlobProp(const aPropName: string): TORMBlob;
     function GetDeleteSQL: string;
     function GetInsertSQL: string;
@@ -137,27 +137,24 @@ type
     procedure AssignProps;
     procedure AssignPropsFromInstance;
     procedure AssignPropsFromPKeyValues(const aPKeyValues: TArray<Variant>);
-    procedure CreateJoinedEntity(aJoinedEntity: TEntityAbstract;
-      aEntityClass: TEntityClass; const aKeyPropName, aEntityPropName, aReferPropName: string);
     procedure ExecToDB(const aSQL: string);
     procedure FillParam(aParam: TFDParam; const aPropName: string; aValue: Variant);
     procedure ForEachBlobProp(aForEachBlobProp: TForEachBlobProp);
-    procedure ForEachJoinedChildProp(aForEachJoinedEntityProc: TForEachJoinedEntityProc);
-    procedure ForEachJoinedParentProp(aForEachJoinedEntityProc: TForEachJoinedEntityProc);
     procedure FreeBlobProps;
     procedure FreeFInstance;
-    procedure FreeJoinedEntity(aJoinedEntity: TEntityAbstract;
-      aEntityClass: TEntityClass; const aKeyPropName, aEntityPropName, aReferPropName: string);
+    procedure FreeJoinedEntities;
+    procedure Init;
     procedure InsertToDB;
     procedure ReadInstance(const aPKeyValues: TArray<Variant>);
+    procedure RemoveJoinedEntity(aValue: TEntityAbstract);
     procedure SetBlobProp(const aPropName: string; aBlob: TORMBlob);
     procedure SetProp(const aPropName: string; aValue: Variant);
-    procedure StoreJoinedChildEnt(aJoinedEntity: TEntityAbstract;
-      aEntityClass: TEntityClass; const aKeyPropName, aEntityPropName, aReferPropName: string);
-    procedure StoreJoinedParentEnt(aJoinedEntity: TEntityAbstract;
-      aEntityClass: TEntityClass; const aKeyPropName, aEntityPropName, aReferPropName: string);
+    procedure StoreJoinedChildEntities;
+    procedure StoreJoinedParentEntities;
     procedure UpdateToDB;
   protected
+    function GetJoinedEntity<T: TEntityAbstract>(const aFKPropName: string; aCurrentValue: T): T;
+    function SetJoinedEntity<T: TEntityAbstract>(const aFKPropName: string; aOldValue, aNewValue: T): T;
     procedure AfterCreate; virtual;
     procedure ApplyAutoGenFields; virtual;
     procedure BeforeDelete; virtual;
@@ -415,8 +412,6 @@ procedure TEntityAbstract.AssignProps;
 begin
   AssignPropsFromInstance;
   AssignBlobPropsFromInstance;
-  ForEachJoinedParentProp(CreateJoinedEntity);
-  ForEachJoinedChildProp(CreateJoinedEntity);
 end;
 
 procedure TEntityAbstract.AssignPropsFromInstance;
@@ -468,9 +463,9 @@ end;
 
 constructor TEntityAbstract.Create(aDBEngine: TDBEngine; const aInstance: TInstance);
 begin
+  Init;
   FDBEngine := aDBEngine;
   FInstance := aInstance;
-  FIsNew := False;
 
   AssignProps;
   AfterCreate;
@@ -487,6 +482,7 @@ end;
 constructor TEntityAbstract.Create(aDBEngine: TDBEngine;
   const aPKeyValues: TArray<Variant>);
 begin
+  Init;
   FDBEngine := aDBEngine;
 
   if (Length(aPKeyValues) > 0) or HasBlob then
@@ -506,8 +502,8 @@ begin
   AfterCreate;
 end;
 
-procedure TEntityAbstract.CreateJoinedEntity(aJoinedEntity: TEntityAbstract;
-  aEntityClass: TEntityClass; const aKeyPropName, aEntityPropName, aReferPropName: string);
+function TEntityAbstract.CreateJoinedEntity(aEntityClass: TEntityClass;
+  const aKeyPropName, aReferPropName: string): TEntityAbstract;
 var
   dsQuery: TFDQuery;
   Instance: TInstance;
@@ -515,9 +511,7 @@ var
   QueryKeeper: IQueryKeeper;
   SQL: string;
 begin
-  if aJoinedEntity <> nil then
-    Exit;
-
+  Result := nil;
   KeyValue := Prop[aKeyPropName];
 
   if (VarToStr(KeyValue) <> '') and
@@ -543,9 +537,9 @@ begin
     begin
       Instance := TInstance.Create(QueryKeeper);
 
-      aJoinedEntity := aEntityClass.Create(FDBEngine, Instance);
-
-      SetObjectProp(Self, aEntityPropName, aJoinedEntity);
+      Result := aEntityClass.Create(FDBEngine, Instance);
+      Result.FOwnedAsJoined := True;
+      FJoinedEntities.Add(Result);
     end;
   end;
 end;
@@ -570,8 +564,7 @@ begin
 
   FreeBlobProps;
   FreeFInstance;
-  ForEachJoinedParentProp(FreeJoinedEntity);
-  ForEachJoinedChildProp(FreeJoinedEntity);
+  FreeJoinedEntities;
   FFreeListProcs.Exec;
 
   inherited;
@@ -683,103 +676,6 @@ begin
     end;
 end;
 
-procedure TEntityAbstract.ForEachJoinedChildProp(
-  aForEachJoinedEntityProc: TForEachJoinedEntityProc);
-var
-  Entity: TEntityAbstract;
-  EntityClass: TEntityClass;
-  FKey: TFKey;
-  FKeys: TFKeys;
-  i: Integer;
-  PropCount: Integer;
-  PropClass: TClass;
-  PropList: PPropList;
-  PropName: string;
-begin
-  PropCount := GetPropList(Self, PropList);
-  try
-    for i := 0 to PropCount - 1 do
-    begin
-      if PropList^[i].PropType^.Kind = tkClass then
-      begin
-        PropClass := GetObjectPropClass(Self, PropList^[i]);
-
-        if PropClass.InheritsFrom(TEntityAbstract) then
-        begin
-          EntityClass := TEntityClass(PropClass);
-          FKeys := EntityClass.GetStructure.FKeys;
-
-          for FKey in FKeys do
-            if (Self.ClassType = FKey.ReferEntityClass) and
-               (FKey.RelType <> rtOne2Many)
-            then
-            begin
-              PropName := GetPropName(PropList^[i]);
-              Entity := GetObjectProp(Self, PropName) as EntityClass;
-
-              aForEachJoinedEntityProc(
-                Entity,
-                EntityClass,
-                FKey.PropName,
-                PropName,
-                FKey.ReferPropName
-              );
-            end;
-        end;
-      end;
-    end;
-  finally
-    FreeMem(PropList);
-  end;
-end;
-
-procedure TEntityAbstract.ForEachJoinedParentProp(
-  aForEachJoinedEntityProc: TForEachJoinedEntityProc);
-var
-  Entity: TEntityAbstract;
-  FKey: TFKey;
-  FKeys: TFKeys;
-  i: Integer;
-  PropCount: Integer;
-  PropClass: TClass;
-  PropList: PPropList;
-  PropName: string;
-begin
-  PropCount := GetPropList(Self, PropList);
-  try
-    FKeys := GetStructure.FKeys;
-
-    for FKey in FKeys do
-    begin
-      if FKey.RelType = rtOne2Many then
-        Continue;
-
-      for i := 0 to PropCount - 1 do
-      begin
-        PropClass := GetObjectPropClass(Self, PropList^[i]);
-        PropName := GetPropName(PropList^[i]);
-
-        if (FKey.ReferEntityClass = PropClass) and
-           ((FKey.PropNameForJoinedEntity = PropName) or FKey.PropNameForJoinedEntity.IsEmpty)
-        then
-        begin
-          Entity := GetObjectProp(Self, PropName) as FKey.ReferEntityClass;
-
-          aForEachJoinedEntityProc(
-            Entity,
-            FKey.ReferEntityClass,
-            FKey.PropName,
-            PropName,
-            FKey.ReferPropName
-          );
-        end;
-      end;
-    end;
-  finally
-    FreeMem(PropList);
-  end;
-end;
-
 procedure TEntityAbstract.FreeBlobProps;
 begin
   ForEachBlobProp(
@@ -796,12 +692,15 @@ begin
     FreeAndNil(FInstance);
 end;
 
-procedure TEntityAbstract.FreeJoinedEntity(aJoinedEntity: TEntityAbstract;
-  aEntityClass: TEntityClass; const aKeyPropName, aEntityPropName,
-  aReferPropName: string);
+procedure TEntityAbstract.FreeJoinedEntities;
+var
+  JoinedEntity: TEntityAbstract;
 begin
-  if Assigned(aJoinedEntity) then
-    FreeAndNil(aJoinedEntity);
+  for JoinedEntity in FJoinedEntities do
+    if JoinedEntity.FOwnedAsJoined then
+      JoinedEntity.Free;
+
+  FJoinedEntities.Free;
 end;
 
 function TEntityAbstract.GetBlobProp(const aPropName: string): TORMBlob;
@@ -859,6 +758,32 @@ begin
   Result := FInstance.FieldByName(aFieldName).Value;
 end;
 
+function TEntityAbstract.GetJoinedEntity<T>(const aFKPropName: string;
+  aCurrentValue: T): T;
+var
+  FKey: TFKey;
+  FKeyValue: Variant;
+begin
+  if GetStructure.FKeys.TryGetFKey(aFKPropName, {out}FKey) then
+  begin
+    if Assigned(aCurrentValue) then
+    begin
+      FKeyValue := Prop[FKey.PropName];
+      if FKeyValue = aCurrentValue.Prop[FKey.ReferPropName] then
+        Result := aCurrentValue
+      else
+      begin
+        RemoveJoinedEntity(aCurrentValue);
+        Result := CreateJoinedEntity(FKey.ReferEntityClass, FKey.PropName, FKey.ReferPropName) as T;
+      end;
+    end
+    else
+      Result := CreateJoinedEntity(FKey.ReferEntityClass, FKey.PropName, FKey.ReferPropName) as T;
+  end
+  else
+    raise Exception.CreateFmt('TEntityAbstract.GetJoinedEntity: FK for property % did not find.', [aFKPropName]);
+end;
+
 function TEntityAbstract.GetNormInstanceFieldValue(
   aInstanceField: TInstanceField): Variant;
 begin
@@ -911,6 +836,9 @@ var
   PropInfo: PPropInfo;
 begin
   PropInfo := GetPropInfo(Self, aPropName);
+
+  if not Assigned(PropInfo) then
+    raise Exception.CreateFmt('TEntityAbstract.GetProp: Prop %s does not exist.', [aPropName]);
 
   if PropInfo^.PropType^.Kind = tkClass then
     Result := Null
@@ -1009,6 +937,12 @@ begin
   end;
 end;
 
+procedure TEntityAbstract.Init;
+begin
+  FIsNew := False;
+  FJoinedEntities := TObjectList<TEntityAbstract>.Create(False{aOwnsObjects});
+end;
+
 procedure TEntityAbstract.InsertToDB;
 var
   SQL: string;
@@ -1084,6 +1018,13 @@ begin
   //required to call in initialization section if ORM Service will be used
 end;
 
+procedure TEntityAbstract.RemoveJoinedEntity(aValue: TEntityAbstract);
+begin
+  FJoinedEntities.Remove(aValue);
+  if aValue.FOwnedAsJoined then
+    aValue.Free;
+end;
+
 procedure TEntityAbstract.Revert;
 begin
   if FIsNew then
@@ -1096,6 +1037,23 @@ end;
 procedure TEntityAbstract.SetBlobProp(const aPropName: string; aBlob: TORMBlob);
 begin
   SetObjectProp(Self, aPropName, aBlob);
+end;
+
+function TEntityAbstract.SetJoinedEntity<T>(const aFKPropName: string; aOldValue, aNewValue: T): T;
+var
+  FKey: TFKey;
+begin
+  if GetStructure.FKeys.TryGetFKey(aFKPropName, {out}FKey) then
+  begin
+    if Assigned(aOldValue) then
+      RemoveJoinedEntity(aOldValue);
+
+    Result := aNewValue;
+    FJoinedEntities.Add(Result);
+    Prop[FKey.PropName] := Result.Prop[FKey.ReferPropName];
+  end
+  else
+    raise Exception.CreateFmt('TEntityAbstract.SetJoinedEntity: FK for property % did not find.', [aFKPropName]);
 end;
 
 procedure TEntityAbstract.SetProp(const aPropName: string; aValue: Variant);
@@ -1116,32 +1074,42 @@ end;
 
 procedure TEntityAbstract.StoreAll;
 begin
-  ForEachJoinedParentProp(StoreJoinedParentEnt);
+  StoreJoinedParentEntities;
   Store;
-  ForEachJoinedChildProp(StoreJoinedChildEnt);
+  StoreJoinedChildEntities;
   FStoreListProcs.Exec;  
 end;
 
-procedure TEntityAbstract.StoreJoinedChildEnt(aJoinedEntity: TEntityAbstract;
-  aEntityClass: TEntityClass; const aKeyPropName, aEntityPropName,
-  aReferPropName: string);
+procedure TEntityAbstract.StoreJoinedChildEntities;
+var
+  FKey: TFKey;
+  JoinedEntity: TEntityAbstract;
 begin
-  if not Assigned(aJoinedEntity) then
-    Exit;
-
-  aJoinedEntity.Prop[aReferPropName] := Prop[aKeyPropName];
-  aJoinedEntity.StoreAll;
+  for JoinedEntity in FJoinedEntities do
+  begin
+    for FKey in JoinedEntity.GetStructure.FKeys do
+      if ClassType = FKey.ReferEntityClass then
+      begin
+        JoinedEntity.Prop[FKey.PropName] := Prop[FKey.ReferPropName];
+        JoinedEntity.StoreAll;
+      end;
+  end;
 end;
 
-procedure TEntityAbstract.StoreJoinedParentEnt(aJoinedEntity: TEntityAbstract;
-  aEntityClass: TEntityClass; const aKeyPropName, aEntityPropName,
-  aReferPropName: string);
+procedure TEntityAbstract.StoreJoinedParentEntities;
+var
+  FKey: TFKey;
+  JoinedEntity: TEntityAbstract;
 begin
-  if not Assigned(aJoinedEntity) then
-    Exit;
-
-  aJoinedEntity.StoreAll;
-  Prop[aKeyPropName] := aJoinedEntity.Prop[aReferPropName];
+  for JoinedEntity in FJoinedEntities do
+  begin
+    for FKey in GetStructure.FKeys do
+      if FKey.ReferEntityClass = JoinedEntity.ClassType then
+      begin
+        JoinedEntity.StoreAll;
+        Prop[FKey.PropName] := JoinedEntity.Prop[FKey.ReferPropName];
+      end;
+  end;
 end;
 
 procedure TEntityAbstract.AddFreeNotify(
@@ -1278,8 +1246,7 @@ end;
 { TFKeysHelper }
 
 procedure TFKeysHelper.Add(const aPropName: string;
-  aReferEntityClass: TEntityClass; const aReferPropName: string; aRelType: TRelType;
-  aPropNameForJoinedEntity: string);
+  aReferEntityClass: TEntityClass; const aReferPropName: string; aRelType: TRelType);
 var
   FKey: TFKey;
 begin
@@ -1287,7 +1254,6 @@ begin
   FKey.ReferEntityClass := aReferEntityClass;
   FKey.ReferPropName := aReferPropName;
   FKey.RelType := aRelType;
-  FKey.PropNameForJoinedEntity := aPropNameForJoinedEntity;
 
   Self := Self + [FKey];
 end;
@@ -1296,11 +1262,21 @@ function TFKeysHelper.Contains(const aPropName: string): Boolean;
 var
   FKey: TFKey;
 begin
+  Result := TryGetFKey(aPropName, FKey);
+end;
+
+function TFKeysHelper.TryGetFKey(const aPropName: string; out aFKey: TFKey): Boolean;
+var
+  FKey: TFKey;
+begin
   Result := False;
 
   for FKey in Self do
     if FKey.PropName = aPropName then
+    begin
+      aFKey := FKey;
       Exit(True);
+    end;
 end;
 
 { ORMUniqueID }
