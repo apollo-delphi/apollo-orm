@@ -28,20 +28,17 @@ type
     procedure AddField(const aPropName: string; const aFieldType: TFieldType);
   end;
 
-  TRelType = (rtUnknown, rtOne2One, rtOne2Many);
-
   TFKey = record
     PropName: string;
     ReferEntityClass: TEntityClass;
     ReferPropName: string;
-    RelType: TRelType;
   end;
 
   TFKeys = TArray<TFKey>;
 
   TFKeysHelper = record helper for TFKeys
     procedure Add(const aPropName: string; aReferEntityClass: TEntityClass;
-      const aReferPropName: string; aRelType: TRelType = rtUnknown);
+      const aReferPropName: string);
     function Contains(const aPropName: string): Boolean;
     function TryGetFKey(const aPropName: string; out aFKey: TFKey): Boolean;
   end;
@@ -97,6 +94,7 @@ type
     function IsModified: Boolean;
     procedure LoadFromFile(const aFilePath: string);
     procedure LoadFromStream(aSourceStream: TStream);
+    procedure SaveToFile(const aFilePath: string);
     constructor Create(aBlobStream: TStream);
     destructor Destroy; override;
     property Stream: TStream read GetStream write SetStream;
@@ -113,7 +111,7 @@ type
     FInstance: TInstance;
     FIsNew: Boolean;
     FJoinedEntities: TObjectList<TEntityAbstract>;
-    FOwnedAsJoined: Boolean;
+    FOwner: TEntityAbstract;
     FRevertListProcs: TSimpleMethods;
     FStoreListProcs: TSimpleMethods;
     function CreateJoinedEntity(aEntityClass: TEntityClass; const aKeyPropName,
@@ -132,6 +130,7 @@ type
     function GetUpdateSQL: string;
     function GetWherePart: string;
     function HasBlob: Boolean;
+    function SetNormPropValue(const aPropName: string; const aValue: Variant): Variant;
     procedure AssignBlobPropsFromInstance;
     procedure AssignInstanceFromProps;
     procedure AssignProps;
@@ -159,6 +158,7 @@ type
     procedure ApplyAutoGenFields; virtual;
     procedure BeforeDelete; virtual;
     procedure BeforeDestroy; virtual;
+    procedure BeforeStore; virtual;
   public
     class function GetPrimaryKey: TPrimaryKey; virtual;
     class function GetStructure: TStructure; virtual; abstract;
@@ -175,6 +175,7 @@ type
     constructor Create(aDBEngine: TDBEngine; const aPKeyValues: TArray<Variant>); overload;
     destructor Destroy; override;
     property IsNew: Boolean read FIsNew;
+    property Owner: TEntityAbstract read FOwner write FOwner;
     property Prop[const aPropName: string]: Variant read GetProp write SetProp;
   end;
 {$M-}
@@ -278,7 +279,8 @@ type
     procedure Store;
     constructor Create(aDBEngine: TDBEngine; const aFilter: TFilter;
       const aOrderBy: POrder = nil); overload;
-    constructor Create(aOwnerEntity: TEntityAbstract); overload;
+    constructor Create(aOwnerEntity: TEntityAbstract;
+      const aOrderBy: POrder = nil); overload;
     destructor Destroy; override;
   end;
 
@@ -404,7 +406,7 @@ begin
       Continue;
 
     if GetNormInstanceFieldValue(FInstance.Fields[i]) <> GetNormPropValue(PropName) then
-      FInstance.Fields[i].Value := Prop[PropName];
+      FInstance.Fields[i].Value := GetNormPropValue(PropName);
   end;
 end;
 
@@ -458,7 +460,10 @@ end;
 
 procedure TEntityAbstract.BeforeDestroy;
 begin
-  FFreeNotifications.Exec;
+end;
+
+procedure TEntityAbstract.BeforeStore;
+begin
 end;
 
 constructor TEntityAbstract.Create(aDBEngine: TDBEngine; const aInstance: TInstance);
@@ -538,8 +543,9 @@ begin
       Instance := TInstance.Create(QueryKeeper);
 
       Result := aEntityClass.Create(FDBEngine, Instance);
-      Result.FOwnedAsJoined := True;
+      Result.FOwner := Self;
       FJoinedEntities.Add(Result);
+      FRevertListProcs.Add(Result.Revert);
     end;
   end;
 end;
@@ -562,6 +568,7 @@ destructor TEntityAbstract.Destroy;
 begin
   BeforeDestroy;
 
+  FFreeNotifications.Exec;
   FreeBlobProps;
   FreeFInstance;
   FreeJoinedEntities;
@@ -643,8 +650,8 @@ begin
         aParam.AsFloat := aValue;
     end;
     ftDateTime: aParam.AsDateTime := aValue;
-    ftBoolean: aParam.AsBoolean := aValue;
-    ftString, ftWideString, ftWideMemo:
+    //ftBoolean: aParam.AsBoolean := aValue;
+    ftString, ftWideString, ftWideMemo, ftBoolean:
     begin
       if aValue = '' then
         aParam.Clear
@@ -697,7 +704,7 @@ var
   JoinedEntity: TEntityAbstract;
 begin
   for JoinedEntity in FJoinedEntities do
-    if JoinedEntity.FOwnedAsJoined then
+    if JoinedEntity.Owner = Self then
       JoinedEntity.Free;
 
   FJoinedEntities.Free;
@@ -810,9 +817,12 @@ begin
 
   if PropInfo^.PropType^.Name = 'Boolean' then
     if Result = 'True' then
-      Result := 1
+      Exit('1')
     else
-      Result := 0;
+      Exit('0');
+
+  if PropInfo.PropType^.Kind = tkEnumeration then
+    Result := GetOrdProp(Self, aPropName);
 end;
 
 function TEntityAbstract.GetPKFieldType(const aPropName: string): TFieldType;
@@ -1021,17 +1031,18 @@ end;
 procedure TEntityAbstract.RemoveJoinedEntity(aValue: TEntityAbstract);
 begin
   FJoinedEntities.Remove(aValue);
-  if aValue.FOwnedAsJoined then
+  if aValue.Owner = Self then
     aValue.Free;
 end;
 
 procedure TEntityAbstract.Revert;
 begin
+  FRevertListProcs.Exec;
+
   if FIsNew then
     Exit;
 
   AssignPropsFromInstance;
-  FRevertListProcs.Exec;
 end;
 
 procedure TEntityAbstract.SetBlobProp(const aPropName: string; aBlob: TORMBlob);
@@ -1043,6 +1054,9 @@ function TEntityAbstract.SetJoinedEntity<T>(const aFKPropName: string; aOldValue
 var
   FKey: TFKey;
 begin
+  if aOldValue = aNewValue then
+    Exit(aOldValue);
+
   if GetStructure.FKeys.TryGetFKey(aFKPropName, {out}FKey) then
   begin
     if Assigned(aOldValue) then
@@ -1050,19 +1064,38 @@ begin
 
     Result := aNewValue;
     FJoinedEntities.Add(Result);
+    FRevertListProcs.Add(Result.Revert);
     Prop[FKey.PropName] := Result.Prop[FKey.ReferPropName];
   end
   else
     raise Exception.CreateFmt('TEntityAbstract.SetJoinedEntity: FK for property % did not find.', [aFKPropName]);
 end;
 
+function TEntityAbstract.SetNormPropValue(const aPropName: string;
+  const aValue: Variant): Variant;
+var
+  PropInfo: PPropInfo;
+begin
+  Result := aValue;
+
+  PropInfo := GetPropInfo(Self, aPropName);
+
+  if PropInfo^.PropType^.Name = 'Boolean' then
+    if Result = 1 then
+      Exit(True)
+    else
+      Exit(False);
+end;
+
 procedure TEntityAbstract.SetProp(const aPropName: string; aValue: Variant);
 begin
-  SetPropValue(Self, aPropName, aValue);
+  SetPropValue(Self, aPropName, SetNormPropValue(aPropName, aValue));
 end;
 
 procedure TEntityAbstract.Store;
 begin
+  BeforeStore;
+
   if FIsNew then
   begin
     InsertToDB;
@@ -1074,10 +1107,18 @@ end;
 
 procedure TEntityAbstract.StoreAll;
 begin
-  StoreJoinedParentEntities;
-  Store;
-  StoreJoinedChildEntities;
-  FStoreListProcs.Exec;  
+  FDBEngine.TransactionStart;
+  try
+    StoreJoinedParentEntities;
+    Store;
+    StoreJoinedChildEntities;
+    FStoreListProcs.Exec;
+
+    FDBEngine.TransactionCommit;
+  except;
+    FDBEngine.TransactionRollback;
+    raise;
+  end;
 end;
 
 procedure TEntityAbstract.StoreJoinedChildEntities;
@@ -1106,7 +1147,7 @@ begin
     for FKey in GetStructure.FKeys do
       if FKey.ReferEntityClass = JoinedEntity.ClassType then
       begin
-        JoinedEntity.StoreAll;
+        JoinedEntity.Store;
         Prop[FKey.PropName] := JoinedEntity.Prop[FKey.ReferPropName];
       end;
   end;
@@ -1246,14 +1287,13 @@ end;
 { TFKeysHelper }
 
 procedure TFKeysHelper.Add(const aPropName: string;
-  aReferEntityClass: TEntityClass; const aReferPropName: string; aRelType: TRelType);
+  aReferEntityClass: TEntityClass; const aReferPropName: string);
 var
   FKey: TFKey;
 begin
   FKey.PropName := aPropName;
   FKey.ReferEntityClass := aReferEntityClass;
   FKey.ReferPropName := aReferPropName;
-  FKey.RelType := aRelType;
 
   Self := Self + [FKey];
 end;
@@ -1357,7 +1397,8 @@ begin
   end;
 end;
 
-constructor TEntityListBase<T>.Create(aOwnerEntity: TEntityAbstract);
+constructor TEntityListBase<T>.Create(aOwnerEntity: TEntityAbstract;
+  const aOrderBy: POrder = nil);
 var
   FieldName: string;
   FKey: TFKey;
@@ -1369,9 +1410,7 @@ begin
   ParamValues := [];
 
   for FKey in FKeys do
-    if (FKey.ReferEntityClass = aOwnerEntity.ClassType) and
-       (FKey.RelType <> rtOne2One)
-    then
+    if FKey.ReferEntityClass = aOwnerEntity.ClassType then
     begin
       FieldName := TORMTools.GetFieldNameByPropName(FKey.PropName);
       sFilter := Format('%s = :%s', [FieldName, FKey.PropName]);
@@ -1385,7 +1424,7 @@ begin
   if not sFilter.IsEmpty then
   begin
     FOwnerEntity := aOwnerEntity;
-    Create(aOwnerEntity.FDBEngine, TFilter.GetWhere(sFilter, ParamValues));
+    Create(aOwnerEntity.FDBEngine, TFilter.GetWhere(sFilter, ParamValues), aOrderBy);
 
     aOwnerEntity.FFreeListProcs.Add(Free);
     aOwnerEntity.FStoreListProcs.Add(Store);
@@ -1489,7 +1528,7 @@ begin
       if i > 0 then
         OrderPart := OrderPart + ',';
       OrderItem := aOrder.FOrderItems[i];
-      OrderPart := OrderPart + Format(' %s', [TORMTools.GetFieldNameByPropName(OrderItem.PropName)]);
+      OrderPart := OrderPart + Format(' `%s`', [TORMTools.GetFieldNameByPropName(OrderItem.PropName)]);
       if OrderItem.IsDESC then
         OrderPart := OrderPart + ' DESC';
     end;
@@ -1636,6 +1675,7 @@ end;
 
 procedure TORMBlob.LoadFromStream(aSourceStream: TStream);
 begin
+  aSourceStream.Position := 0;
   FreeModifiedStream;
   FModifiedStream := TMemoryStream.Create;
   FModifiedStream.CopyFrom(aSourceStream, aSourceStream.Size);
@@ -1650,6 +1690,18 @@ begin
   FInstanceStream := FModifiedStream;
 
   FModifiedStream := nil;
+end;
+
+procedure TORMBlob.SaveToFile(const aFilePath: string);
+var
+  FileStream: TFileStream;
+begin
+  FileStream := TFileStream.Create(aFilePath, fmCreate);
+  try
+    FileStream.CopyFrom(GetStream, GetStream.Size);
+  finally
+    FileStream.Free;
+  end;
 end;
 
 procedure TORMBlob.SetStream(aStream: TStream);

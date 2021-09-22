@@ -132,6 +132,7 @@ end;
 function TORMService.GetFieldDef(aRttiProperty: TRttiProperty): TFieldDef;
 var
   Attribute: TCustomAttribute;
+  Words: TArray<string>;
 begin
   Result.Init;
 
@@ -149,6 +150,15 @@ begin
 
   if (Result.SQLType = 'VARCHAR') and (Result.FieldLength = 0) then
     Result.FieldLength := 255;
+
+  if Result.SQLType.Contains('(') then
+  begin
+    Words := Result.SQLType.Split(['(', ')']);
+    Result.SQLType := Words[0];
+
+    if not Words[1].Contains(',') then
+      Result.FieldLength := Words[1].ToInteger;
+  end;
 end;
 
 function TORMService.TryGetIndexDef(aRttiProperty: TRttiProperty; out aIndexDef: TIndexDef): Boolean;
@@ -222,8 +232,17 @@ begin
   then
     Exit('BLOB');
 
+  if aRttiProperty.PropertyType.Name.ToUpper = 'TDATETIME' then
+    Exit('DATETIME')
+  else
+  if aRttiProperty.PropertyType.Name.ToUpper = 'BOOLEAN' then
+    Exit('TYNYINT(1)')
+  else
+  if aRttiProperty.PropertyType.Name.ToUpper = 'CURRENCY' then
+    Exit('NUMERIC(18,2)');
+
   case aRttiProperty.PropertyType.TypeKind of
-    tkInteger: Result := 'INTEGER';
+    tkInteger, tkEnumeration: Result := 'INTEGER';
     tkString, tkUString: Result:= 'VARCHAR';
   end;
 end;
@@ -369,28 +388,33 @@ begin
 
       if not SQL.IsEmpty then
       begin
-        FDBEngine.TransactionStart;
+        FDBEngine.DisableForeignKeys;
         try
-          FDBEngine.ExecSQL(SQL);
+          FDBEngine.TransactionStart;
+          try
+            FDBEngine.ExecSQL(SQL);
 
-          ORMTable.TableName := TableDef.TableName;
-          ORMTable.ORMFields.Clear;
+            ORMTable.TableName := TableDef.TableName;
+            ORMTable.ORMFields.Clear;
 
-          HandleEntityFields(aEntityType.GetProperties, procedure(aRttiProperty: TRttiProperty)
-            begin
-              ORMField := TORMField.Create(FDBEngine);
-              ORMField.FieldName := TORMTools.GetFieldNameByPropName(aRttiProperty.Name);
-              ORMField.ORMUniqueID := GetORMUniqueID(aRttiProperty);
+            HandleEntityFields(aEntityType.GetProperties, procedure(aRttiProperty: TRttiProperty)
+              begin
+                ORMField := TORMField.Create(FDBEngine);
+                ORMField.FieldName := TORMTools.GetFieldNameByPropName(aRttiProperty.Name);
+                ORMField.ORMUniqueID := GetORMUniqueID(aRttiProperty);
 
-              ORMTable.ORMFields.Add(ORMField);
-            end
-          );
-          ORMTable.StoreAll;
+                ORMTable.ORMFields.Add(ORMField);
+              end
+            );
+            ORMTable.StoreAll;
 
-          FDBEngine.TransactionCommit;
-        except;
-          FDBEngine.TransactionRollback;
-          raise;
+            FDBEngine.TransactionCommit;
+          except;
+            FDBEngine.TransactionRollback;
+            raise;
+          end;
+        finally
+          FDBEngine.EnableForeignKeys;
         end;
       end;
     finally
@@ -473,9 +497,11 @@ end;
 class function TORMField.GetStructure: TStructure;
 begin
   Result.TableName := 'ORM_FIELD';
+
   Result.PrimaryKey.AddField('ORMUniqueID', TFieldType.ftString);
   Result.PrimaryKey.AddField('TableID', TFieldType.ftString);
-  Result.FKeys.Add('TableID', TORMTable, 'ORMUniqueID', rtOne2Many);
+
+  Result.FKeys.Add('TableID', TORMTable, 'ORMUniqueID');
 end;
 
 end.
