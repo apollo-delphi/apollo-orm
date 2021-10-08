@@ -4,7 +4,9 @@ interface
 
 uses
   Apollo_DB_Core,
+  Apollo_DB_Utils,
   Apollo_ORM,
+  System.Generics.Collections,
   System.Rtti;
 
 type
@@ -40,14 +42,31 @@ type
     [NotNull]
     property TableName: string read FTableName write FTableName;
   end;
+
+  TORMTransfer = class(TEntityAbstract)
+  strict private
+    FNum: Integer;
+    FSQLCode: string;
+  public
+    class function GetStructure: TStructure; override;
+  published
+    [NotNull]
+    property Num: Integer read FNum write FNum;
+    [Text]
+    property SQLCode: string read FSQLCode write FSQLCode;
+  end;
 {$M-}
 
   THandleEntityFieldProc = reference to procedure(aRttiProperty: TRttiProperty);
+  TTransferData = TDictionary<string, IQueryKeeper>;
 
   TORMService = class
   private
     FDBEngine: TDBEngine;
+    FMaxDataTransferNum: Integer;
+    FNextMaxDataTransferNum: Integer;
     FRttiContext: TRttiContext;
+    FTransferData: TTransferData;
     function GetFieldDef(aRttiProperty: TRttiProperty): TFieldDef;
     function GetORMDef(aEntityClass: TEntityClass): TTableDef;
     function GetORMTable(const aORMUniqueID: string): TORMTable;
@@ -57,15 +76,25 @@ type
     function GetTableDef(const aStructure: TStructure; aORMTable: TORMTable;
       aEntityType: TRttiInstanceType): TTableDef;
     function GetTypesInheritFrom(aClass: TClass): TArray<TRttiInstanceType>;
+    function HandleEntityType(aEntityType: TRttiInstanceType): string;
+    function HandleTransferNum(const aNum: Integer): Boolean;
     function IsAbstract(aRttiObject: TRttiObject): Boolean;
     function IsORMEntity(aClass: TClass): Boolean;
     function TryGetIndexDef(aRttiProperty: TRttiProperty; out aIndexDef: TIndexDef): Boolean;
     function TryGetStructure(aEntityType: TRttiInstanceType; out aStructure: TStructure): Boolean;
     procedure CreateORMTablesIfNotExist;
+    procedure HandleORMTransferRecord(const aSQLCode: string);
     procedure HandleEntityFields(aEntityProperties: TArray<TRttiProperty>;
       aHandleEntityFieldProc: THandleEntityFieldProc);
-    procedure HandleEntityType(aEntityType: TRttiInstanceType);
-    public
+  protected
+    function FinishTransfer(const aNum: Integer): Boolean;
+    function MakeQuery(const aTableName: string): IQueryKeeper;
+    function StartTransfer(const aNum: Integer): Boolean;
+    procedure AfterMigrate(aData: TTransferData); virtual;
+    procedure BeforeMigrate(aData: TTransferData); virtual;
+  public
+    class function GetMaxDataTransferNum(aDBEngine: TDBEngine): Integer;
+    class function NeedToFirstMigrate(aDBEngine: TDBEngine): Boolean;
     procedure Migrate(aDBEngine: TDBEngine);
     constructor Create;
     destructor Destroy; override;
@@ -77,6 +106,7 @@ uses
   Apollo_Helpers,
   Apollo_ORM_Exception,
   System.Classes,
+  System.Math,
   System.SysUtils,
   System.TypInfo;
 
@@ -98,6 +128,14 @@ begin
     raise EORMGetStructureIsAbstract.Create(TEntityClass(aEntityType.MetaclassType));
 end;
 
+procedure TORMService.AfterMigrate(aData: TTransferData);
+begin
+end;
+
+procedure TORMService.BeforeMigrate(aData: TTransferData);
+begin
+end;
+
 constructor TORMService.Create;
 begin
   FRttiContext := TRttiContext.Create;
@@ -109,7 +147,7 @@ var
   EntityClasses: TArray<TEntityClass>;
   SQLList: TStringList;
 begin
-  EntityClasses := [TORMTable, TORMField];
+  EntityClasses := [TORMTable, TORMField, TORMTransfer];
 
   for EntityClass in EntityClasses do
     if not FDBEngine.TableExists(EntityClass.GetTableName) then
@@ -127,6 +165,11 @@ destructor TORMService.Destroy;
 begin
   FRttiContext.Free;
   inherited;
+end;
+
+function TORMService.FinishTransfer(const aNum: Integer): Boolean;
+begin
+  Result := HandleTransferNum(aNum);
 end;
 
 function TORMService.GetFieldDef(aRttiProperty: TRttiProperty): TFieldDef;
@@ -161,17 +204,37 @@ begin
   end;
 end;
 
+class function TORMService.GetMaxDataTransferNum(aDBEngine: TDBEngine): Integer;
+var
+  QueryKeeper: IQueryKeeper;
+begin
+  if not aDBEngine.TableExists('ORM_TRANSFER') then
+    Exit(-1);
+
+  QueryKeeper := MakeQueryKeeper;
+  QueryKeeper.Query.SQL.Text := 'SELECT MAX(NUM) FROM ORM_TRANSFER';
+  aDBEngine.OpenQuery(QueryKeeper.Query);
+
+  if not QueryKeeper.Query.Fields[0].IsNull then
+    Result := QueryKeeper.Query.Fields[0].AsInteger
+  else
+    Result := -1;
+end;
+
 function TORMService.TryGetIndexDef(aRttiProperty: TRttiProperty; out aIndexDef: TIndexDef): Boolean;
 var
   Attribute: TCustomAttribute;
 begin
   Result := False;
+  aIndexDef.Init;
 
   for Attribute in aRttiProperty.GetAttributes do
-    if Attribute is Index then
+    if (Attribute is Index) or (Attribute is Unique) then
     begin
       aIndexDef.IndexName := '';
       aIndexDef.FieldNames := [TORMTools.GetFieldNameByPropName(aRttiProperty.Name)];
+      if Attribute is Unique then
+        aIndexDef.Unique := True;
       Result := True;
     end;
 end;
@@ -255,7 +318,6 @@ var
   FKey: TFKey;
   FKeyDef: TFKeyDef;
   KeyField: TKeyField;
-  ORMField: TORMField;
   TableDef: TTableDef;
 begin
   TableDef.Init;
@@ -278,7 +340,9 @@ begin
 
   HandleEntityFields(aEntityType.GetProperties, procedure(aRttiProperty: TRttiProperty)
     var
+      FieldDef: TFieldDef;
       IndexDef: TIndexDef;
+      ORMField: TORMField;
     begin
       FieldDef := GetFieldDef(aRttiProperty);
 
@@ -295,7 +359,7 @@ begin
 
       TableDef.FieldDefs := TableDef.FieldDefs + [FieldDef];
 
-      if TryGetIndexDef(aRttiProperty, IndexDef) then
+      if TryGetIndexDef(aRttiProperty, {out}IndexDef) then
       begin
         IndexDef.IndexName := 'IDX_' + TStringTools.GetHash16(TableDef.TableName + IndexDef.FieldNames.CommaText);
         TableDef.IndexDefs := TableDef.IndexDefs + [IndexDef];
@@ -311,6 +375,9 @@ begin
     FKeyDef.ReferenceFieldName := TORMTools.GetFieldNameByPropName(FKey.ReferPropName);
 
     TableDef.FKeyDefs := TableDef.FKeyDefs + [FKeyDef];
+
+    if not TableDef.IndexDefs.Contains([FKeyDef.FieldName]) then
+      TableDef.IndexDefs := TableDef.IndexDefs + [FKeyDef.GetIndexDef];
   end;
 
   Result := TableDef;
@@ -350,27 +417,27 @@ begin
   end;
 end;
 
-procedure TORMService.HandleEntityType(aEntityType: TRttiInstanceType);
+function TORMService.HandleEntityType(aEntityType: TRttiInstanceType): string;
 var
   ORMField: TORMField;
   ORMTable: TORMTable;
   Structure: TStructure;
-  SQL: string;
   SQLList: TStringList;
   TableDef: TTableDef;
 begin
+  Result := '';
+
   if TryGetStructure(aEntityType, Structure) then
   begin
     ORMTable := GetORMTable(GetORMUniqueID(aEntityType));
     try
       TableDef := GetTableDef(Structure, ORMTable, aEntityType);
 
-      SQL := '';
       if ORMTable.IsNew then
       begin
         SQLList := FDBEngine.GetCreateTableSQL(TableDef);
         try
-          SQL := SQLList.Text;
+          Result := SQLList.Text;
         finally
           SQLList.Free;
         end;
@@ -380,47 +447,74 @@ begin
         SQLList := FDBEngine.GetModifyTableSQL(TableDef);
         try
           if SQLList.Count > 0 then
-            SQL := SQLList.Text;
+            Result := SQLList.Text;
         finally
           SQLList.Free;
         end;
       end;
 
-      if not SQL.IsEmpty then
+      if not Result.IsEmpty then
       begin
-        FDBEngine.DisableForeignKeys;
-        try
-          FDBEngine.TransactionStart;
-          try
-            FDBEngine.ExecSQL(SQL);
+        FDBEngine.ExecSQL(Result);
 
-            ORMTable.TableName := TableDef.TableName;
-            ORMTable.ORMFields.Clear;
+        ORMTable.TableName := TableDef.TableName;
+        ORMTable.ORMFields.Clear;
 
-            HandleEntityFields(aEntityType.GetProperties, procedure(aRttiProperty: TRttiProperty)
-              begin
-                ORMField := TORMField.Create(FDBEngine);
-                ORMField.FieldName := TORMTools.GetFieldNameByPropName(aRttiProperty.Name);
-                ORMField.ORMUniqueID := GetORMUniqueID(aRttiProperty);
+        HandleEntityFields(aEntityType.GetProperties, procedure(aRttiProperty: TRttiProperty)
+          begin
+            ORMField := TORMField.Create(FDBEngine);
+            ORMField.FieldName := TORMTools.GetFieldNameByPropName(aRttiProperty.Name);
+            ORMField.ORMUniqueID := GetORMUniqueID(aRttiProperty);
+            ORMTable.ORMFields.Add(ORMField);
+          end
+        );
 
-                ORMTable.ORMFields.Add(ORMField);
-              end
-            );
-            ORMTable.StoreAll;
-
-            FDBEngine.TransactionCommit;
-          except;
-            FDBEngine.TransactionRollback;
-            raise;
-          end;
-        finally
-          FDBEngine.EnableForeignKeys;
-        end;
+        ORMTable.StoreAll;
       end;
     finally
       ORMTable.Free;
     end;
   end;
+end;
+
+procedure TORMService.HandleORMTransferRecord(const aSQLCode: string);
+var
+  ORMTransfer: TORMTransfer;
+begin
+  if (FNextMaxDataTransferNum > FMaxDataTransferNum) or (FMaxDataTransferNum = -1) then
+  begin
+    ORMTransfer := TORMTransfer.Create(FDBEngine);
+    try
+      if FMaxDataTransferNum = -1 then
+        ORMTransfer.Num := Max(FNextMaxDataTransferNum, 0)
+      else
+      begin
+        ORMTransfer.Num := FNextMaxDataTransferNum;
+        ORMTransfer.SQLCode := aSQLCode;
+      end;
+
+      ORMTransfer.Store;
+    finally
+      ORMTransfer.Free;
+    end;
+  end;
+end;
+
+function TORMService.HandleTransferNum(const aNum: Integer): Boolean;
+begin
+  if FMaxDataTransferNum = -1 then
+  begin
+    Result := False;
+    FNextMaxDataTransferNum := Max(aNum, FNextMaxDataTransferNum);
+  end
+  else
+  if aNum > FMaxDataTransferNum then
+  begin
+    Result := True;
+    FNextMaxDataTransferNum := Max(aNum, FNextMaxDataTransferNum);
+  end
+  else
+    Result := False;
 end;
 
 function TORMService.IsAbstract(aRttiObject: TRttiObject): Boolean;
@@ -441,28 +535,84 @@ end;
 function TORMService.IsORMEntity(aClass: TClass): Boolean;
 begin
   if (aClass = TORMTable) or
-     (aClass = TORMField)
+     (aClass = TORMField) or
+     (aClass = TORMTransfer)
   then
     Result := True
   else
     Result := False;
 end;
 
+function TORMService.MakeQuery(const aTableName: string): IQueryKeeper;
+begin
+  Result := MakeQueryKeeper;
+  Result.Query.SQL.Text := Format('SELECT * FROM %s', [aTableName]);
+  FDBEngine.OpenQuery(Result.Query);
+end;
+
 procedure TORMService.Migrate(aDBEngine: TDBEngine);
 var
   EntityType: TRttiInstanceType;
   EntityTypes: TArray<TRttiInstanceType>;
+  SQL: string;
+  SQLList: TStringList;
 begin
   FDBEngine := aDBEngine;
-  CreateORMTablesIfNotExist;
 
-  EntityTypes := GetTypesInheritFrom(TEntityAbstract);
+  FTransferData := TTransferData.Create;
+  SQLList := TStringList.Create;
+  FDBEngine.DisableForeignKeys;
+  try
+    FDBEngine.TransactionStart;
+    try
+      CreateORMTablesIfNotExist;
+      FMaxDataTransferNum := GetMaxDataTransferNum(FDBEngine);
+      FNextMaxDataTransferNum := FMaxDataTransferNum;
 
-  for EntityType in EntityTypes do
-  begin
-    if not IsORMEntity(EntityType.MetaclassType) then
-      HandleEntityType(EntityType);
+      BeforeMigrate(FTransferData);
+
+      EntityTypes := GetTypesInheritFrom(TEntityAbstract);
+      for EntityType in EntityTypes do
+      begin
+        if not IsORMEntity(EntityType.MetaclassType) then
+        begin
+          SQL := HandleEntityType(EntityType);
+          if not SQL.IsEmpty then
+            SQLList.Add(SQL);
+        end;
+      end;
+
+      if SQLList.Count > 0 then
+      begin
+        AfterMigrate(FTransferData);
+        HandleORMTransferRecord(SQLList.Text);
+      end
+      else
+      begin
+        FDBEngine.TransactionRollback;
+        Exit;
+      end;
+
+      FDBEngine.TransactionCommit;
+    except;
+      FDBEngine.TransactionRollback;
+      raise;
+    end;
+  finally
+    FDBEngine.EnableForeignKeys;
+    FTransferData.Free;
+    SQLList.Free;
   end;
+end;
+
+class function TORMService.NeedToFirstMigrate(aDBEngine: TDBEngine): Boolean;
+begin
+  Result := GetMaxDataTransferNum(aDBEngine) = -1;
+end;
+
+function TORMService.StartTransfer(const aNum: Integer): Boolean;
+begin
+  Result := HandleTransferNum(aNum);
 end;
 
 { TORMTable }
@@ -502,6 +652,14 @@ begin
   Result.PrimaryKey.AddField('TableID', TFieldType.ftString);
 
   Result.FKeys.Add('TableID', TORMTable, 'ORMUniqueID');
+end;
+
+{ TORMTransfer }
+
+class function TORMTransfer.GetStructure: TStructure;
+begin
+  Result.TableName := 'ORM_TRANSFER';
+  Result.PrimaryKey.AddField('Num', TFieldType.ftInteger);
 end;
 
 end.

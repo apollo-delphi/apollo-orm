@@ -4,12 +4,14 @@ interface
 
 uses
   Apollo_DB_Core,
+  Apollo_DB_Utils,
   Apollo_Types,
   Data.DB,
   FireDAC.Comp.Client,
   FireDAC.Stan.Param,
   System.Classes,
-  System.Generics.Collections;
+  System.Generics.Collections,
+  System.Generics.Defaults;
 
 type
   TFieldType = Data.DB.TFieldType;
@@ -40,7 +42,8 @@ type
     procedure Add(const aPropName: string; aReferEntityClass: TEntityClass;
       const aReferPropName: string);
     function Contains(const aPropName: string): Boolean;
-    function TryGetFKey(const aPropName: string; out aFKey: TFKey): Boolean;
+    function TryGetFKey(const aPropName: string; out aFKey: TFKey): Boolean; overload;
+    function TryGetFKey(aReferEntityClass: TEntityClass; out aFKey: TFKey): Boolean; overload;
   end;
 
   TStructure = record
@@ -57,11 +60,6 @@ type
     Value: Variant;
   end;
 
-  IQueryKeeper = interface
-    function GetQuery: TFDQuery;
-    property Query: TFDQuery read GetQuery;
-  end;
-  
   TInstance = class
   strict private
     FFields: TArray<TInstanceField>;
@@ -71,7 +69,7 @@ type
     function FieldByName(const aFieldName: string): PInstanceField;
     procedure SetQueryKeeper(aQueryKeeper: IQueryKeeper);
     constructor Create(aQueryKeeper: IQueryKeeper);
-    property Fields: TArray<TInstanceField> read FFields write FFields;    
+    property Fields: TArray<TInstanceField> read FFields write FFields;
   end;
 
   TORMTools = record
@@ -101,6 +99,7 @@ type
   end;
 
   TForEachBlobProp = reference to procedure(aBlob: TORMBlob);
+  TCreateListFunc<T> = reference to function: T;
 
 {$M+}
   TEntityAbstract = class abstract(TIntefacedObjectNotUsingReference, ISourceFreeNotification)
@@ -111,6 +110,7 @@ type
     FInstance: TInstance;
     FIsNew: Boolean;
     FJoinedEntities: TObjectList<TEntityAbstract>;
+    FNeedToRefresh: Boolean;
     FOwner: TEntityAbstract;
     FRevertListProcs: TSimpleMethods;
     FStoreListProcs: TSimpleMethods;
@@ -153,6 +153,7 @@ type
     procedure UpdateToDB;
   protected
     function GetJoinedEntity<T: TEntityAbstract>(const aFKPropName: string; aCurrentValue: T): T;
+    function GetJoinedList<T: class>(aCurrentList: T; aCreateListFunc: TCreateListFunc<T>): T;
     function SetJoinedEntity<T: TEntityAbstract>(const aFKPropName: string; aOldValue, aNewValue: T): T;
     procedure AfterCreate; virtual;
     procedure ApplyAutoGenFields; virtual;
@@ -167,6 +168,7 @@ type
     function PropExists(const aPropName: string): Boolean;
     procedure AddFreeNotify(aNotifyEvent: TNotifyEvent);
     procedure Delete;
+    procedure Refresh;
     procedure Revert;
     procedure Store;
     procedure StoreAll;
@@ -192,6 +194,9 @@ type
   end;
 
   Index = class(TCustomAttribute)
+  end;
+
+  Unique = class(TCustomAttribute)
   end;
 
   NotNull = class(TCustomAttribute)
@@ -230,49 +235,46 @@ type
     constructor Create(aOwnsObjects: Boolean = True); reintroduce;
   end;
 
-  TFilterMode = (fmUnknown, fmGetAll, fmGetWhere);
-
-  TFilter = record
-  private
-    FFilterMode: TFilterMode;
-    FParamValues: TArray<Variant>;
-    FWhereString: string;
-    procedure Init;
-  public
-    class function GetAll: TFilter; static;
-    class function GetWhere(const aWhereString: string;
-      const aParamValues: TArray<Variant>): TFilter; static;
-  end;
-
-  TOrderItem = record
-    IsDESC: Boolean;
-    PropName: string;
-  end;
-
-  POrder = ^TOrder;
-  TOrder = record
-  private
-    FOrderItems: TArray<TOrderItem>;
-  public
-    class function New: TOrder; static;
-    function Add(const aPropName: string): POrder;
-    function AddDESC(const aPropName: string): POrder;
+  IEntityListBuilder = interface
+  ['{1E55579C-26C1-47AD-974E-1051B249D148}']
+    function AddAndWhere(const aAlias, aPropName: string; const a흎uality: T흎uality;
+      const aParamName: string): IEntityListBuilder;
+    function AddCount(const aAlias, aPropName, aAsFieldName: string): IEntityListBuilder;
+    function AddLeftJoin(aEntityClass: TEntityClass; const aAlias: string): IEntityListBuilder;
+    function AddOrderBy(const aOrderItem: TOrderItem): IEntityListBuilder;
+    function BuildSQL: string;
+    function FromTable(aEntityClass: TEntityClass): IEntityListBuilder;
+    function GetLimit: Integer;
+    function SetLimit(const aValue: Integer): IEntityListBuilder;
+    function SetOffset(const aValue: Integer): IEntityListBuilder;
+    function SetParam(const aParamName: string; const aValue: Variant): IEntityListBuilder;
+    procedure FillParams(aQuery: TFDQuery);
+    property Limit: Integer read GetLimit;
   end;
 
   TEntityListBase<T: TEntityAbstract> = class(TEntityListAbstract<T>)
   private
+    FBuilder: IEntityListBuilder;
+    FCanLoadMore: Boolean;
     FDBEngine: TDBEngine;
     FFKey: TFKey;
+    FOffset: Integer;
     FOwnerEntity: TEntityAbstract;
     FRecycleBin: TArray<T>;
     function GetSelectSQL(const aFilter: TFilter; const aOrder: POrder): string;
     procedure CleanRecycleBin;
     procedure FillList(const aFilter: TFilter; const aOrder: POrder);
+    procedure LoadList;
+  protected
+    FComparer: IComparer<T>;
+    procedure AfterCreate; virtual;
   public
+    function CanLoadMore(out aFromRec: Integer): Boolean;
     procedure Clear;
     procedure Delete(const aEntity: T); overload;
     procedure Delete(const aIndex: Integer); overload;
     procedure DeleteAll;
+    procedure LoadMore;
     procedure Remove(const aEntity: T); overload;
     procedure Remove(const aIndex: Integer); overload;
     procedure Revert;
@@ -281,10 +283,11 @@ type
       const aOrderBy: POrder = nil); overload;
     constructor Create(aOwnerEntity: TEntityAbstract;
       const aOrderBy: POrder = nil); overload;
+    constructor Create(aDBEngine: TDBEngine; const aBuilder: IEntityListBuilder = nil); overload;
     destructor Destroy; override;
   end;
 
-function MakeQueryKeeper(aQuery: TFDQuery): IQueryKeeper;
+  function MakeEntityListBuilder(const aAlias: string): IEntityListBuilder;
 
 implementation
 
@@ -292,22 +295,52 @@ uses
   Apollo_Helpers,
   Apollo_ORM_Exception,
   System.Character,
+  System.Rtti,
   System.SysUtils,
   System.TypInfo,
   System.Variants;
 
 type
-  TQueryKeeper = class(TInterfacedObject, IQueryKeeper) 
-  private
-    FQuery: TFDQuery;
-    function GetQuery: TFDQuery;
-    constructor Create(aQuery: TFDQuery); 
-    destructor Destroy; override;
+  TJoinEntItem = record
+    Alias: string;
+    EntityClass: TEntityClass;
+    LeftJoin: Boolean;
   end;
 
-function MakeQueryKeeper(aQuery: TFDQuery): IQueryKeeper;
+  TEntityListBuilder = class(TInterfacedObject, IEntityListBuilder)
+  private
+    FAgrFields: TArray<string>;
+    FAlias: string;
+    FEntityClass: TEntityClass;
+    FJoinEntItems: TArray<TJoinEntItem>;
+    FNeedGroupBy: Boolean;
+    FQueryBuilder: IQueryBuilder;
+    function GetPublishedProps(aClass: TClass): TArray<string>;
+  protected
+    function AddAndWhere(const aAlias, aPropName: string; const a흎uality: T흎uality;
+      const aParamName: string): IEntityListBuilder;
+    function AddCount(const aAlias, aPropName, aAsFieldName: string): IEntityListBuilder;
+    function AddLeftJoin(aEntityClass: TEntityClass; const aAlias: string): IEntityListBuilder;
+    function AddOrderBy(const aOrderItem: TOrderItem): IEntityListBuilder;
+    function BuildSQL: string;
+    function FromTable(aEntityClass: TEntityClass): IEntityListBuilder;
+    function GetLimit: Integer;
+    function SetLimit(const aValue: Integer): IEntityListBuilder;
+    function SetOffset(const aValue: Integer): IEntityListBuilder;
+    function SetParam(const aParamName: string; const aValue: Variant): IEntityListBuilder;
+    procedure FillParams(aQuery: TFDQuery);
+  public
+    procedure AfterConstruction; override;
+  end;
+
+function MakeEntityListBuilder(const aAlias: string): IEntityListBuilder;
+var
+  Builder: TEntityListBuilder;
 begin
-  Result := TQueryKeeper.Create(aQuery);
+  Builder := TEntityListBuilder.Create;
+  Builder.FAlias := aAlias;
+
+  Result := Builder as IEntityListBuilder;
 end;
 
 { TORMTools }
@@ -776,12 +809,13 @@ begin
     if Assigned(aCurrentValue) then
     begin
       FKeyValue := Prop[FKey.PropName];
-      if FKeyValue = aCurrentValue.Prop[FKey.ReferPropName] then
+      if not FNeedToRefresh and (FKeyValue = aCurrentValue.Prop[FKey.ReferPropName]) then
         Result := aCurrentValue
       else
       begin
         RemoveJoinedEntity(aCurrentValue);
         Result := CreateJoinedEntity(FKey.ReferEntityClass, FKey.PropName, FKey.ReferPropName) as T;
+        FNeedToRefresh := False;
       end;
     end
     else
@@ -789,6 +823,25 @@ begin
   end
   else
     raise Exception.CreateFmt('TEntityAbstract.GetJoinedEntity: FK for property % did not find.', [aFKPropName]);
+end;
+
+function TEntityAbstract.GetJoinedList<T>(aCurrentList: T; aCreateListFunc: TCreateListFunc<T>): T;
+begin
+  if not Assigned(aCurrentList) then
+    Result := aCreateListFunc
+  else
+  if FNeedToRefresh then
+  begin
+    FFreeListProcs.Remove(Pointer(aCurrentList));
+    FRevertListProcs.Remove(Pointer(aCurrentList));
+    FStoreListProcs.Remove(Pointer(aCurrentList));
+    aCurrentList.Free;
+
+    Result := aCreateListFunc;
+    FNeedToRefresh := False;
+  end
+  else
+    Result := aCurrentList;
 end;
 
 function TEntityAbstract.GetNormInstanceFieldValue(
@@ -1021,6 +1074,11 @@ begin
     FIsNew := True;
 
   FInstance := TInstance.Create(QueryKeeper);
+end;
+
+procedure TEntityAbstract.Refresh;
+begin
+  FNeedToRefresh := True;
 end;
 
 class procedure TEntityAbstract.RegisterForService;
@@ -1305,6 +1363,20 @@ begin
   Result := TryGetFKey(aPropName, FKey);
 end;
 
+function TFKeysHelper.TryGetFKey(aReferEntityClass: TEntityClass;
+  out aFKey: TFKey): Boolean;
+var
+  FKey: TFKey;
+begin
+  Result := False;
+  for FKey in Self do
+    if FKey.ReferEntityClass = aReferEntityClass then
+    begin
+      aFKey := FKey;
+      Exit(True);
+    end;
+end;
+
 function TFKeysHelper.TryGetFKey(const aPropName: string; out aFKey: TFKey): Boolean;
 var
   FKey: TFKey;
@@ -1338,29 +1410,6 @@ begin
   Result := T;
 end;
 
-{ TFilter }
-
-class function TFilter.GetAll: TFilter;
-begin
-  Result.Init;
-  Result.FFilterMode := fmGetAll;
-end;
-
-class function TFilter.GetWhere(const aWhereString: string; const aParamValues: TArray<Variant>): TFilter;
-begin
-  Result.Init;
-  Result.FFilterMode := fmGetWhere;
-  Result.FWhereString := aWhereString;
-  Result.FParamValues := aParamValues;
-end;
-
-procedure TFilter.Init;
-begin
-  FFilterMode := fmUnknown;
-  FParamValues := [];
-  FWhereString := '';
-end;
-
 { TEntityListBase<T> }
 
 constructor TEntityListBase<T>.Create(aDBEngine: TDBEngine; const aFilter: TFilter;
@@ -1370,6 +1419,12 @@ begin
 
   FDBEngine := aDBEngine;
   FillList(aFilter, aOrderBy);
+
+  AfterCreate;
+end;
+
+procedure TEntityListBase<T>.AfterCreate;
+begin
 end;
 
 procedure TEntityListBase<T>.CleanRecycleBin;
@@ -1395,6 +1450,18 @@ begin
     Entity := Items[i];
     Remove(Entity);
   end;
+end;
+
+constructor TEntityListBase<T>.Create(aDBEngine: TDBEngine;
+  const aBuilder: IEntityListBuilder);
+begin
+  inherited Create(True);
+
+  FDBEngine := aDBEngine;
+  FBuilder := aBuilder;
+  FOffset := 0;
+
+  LoadList;
 end;
 
 constructor TEntityListBase<T>.Create(aOwnerEntity: TEntityAbstract;
@@ -1483,11 +1550,11 @@ begin
 
   dsQuery.SQL.Text := SQL;
 
-  if Length(aFilter.FParamValues) <> dsQuery.Params.Count then
+  if Length(aFilter.ParamValues) <> dsQuery.Params.Count then
     raise EORMWrongInputCount.Create;
 
   for i := 0 to dsQuery.Params.Count - 1 do
-    dsQuery.Params.Items[i].Value := aFilter.FParamValues[i];
+    dsQuery.Params.Items[i].Value := aFilter.ParamValues[i];
 
   FDBEngine.OpenQuery(dsQuery);
 
@@ -1514,28 +1581,71 @@ begin
   WherePart := '';
   OrderPart := '';
 
-  case aFilter.FFilterMode of
+  case aFilter.FilterMode of
     fmUnknown: Exit('');
     fmGetAll: WherePart := '';
-    fmGetWhere: WherePart := ' WHERE ' + aFilter.FWhereString;
+    fmGetWhere: WherePart := ' WHERE ' + aFilter.WhereString;
   end;
 
-  if Assigned(aOrder) and (Length(aOrder.FOrderItems) > 0) then
+  if Assigned(aOrder) and (Length(aOrder.OrderItems) > 0) then
   begin
     OrderPart := ' ORDER BY';
-    for i := Low(aOrder.FOrderItems) to High(aOrder.FOrderItems) do
+    for i := Low(aOrder.OrderItems) to High(aOrder.OrderItems) do
     begin
       if i > 0 then
         OrderPart := OrderPart + ',';
-      OrderItem := aOrder.FOrderItems[i];
-      OrderPart := OrderPart + Format(' `%s`', [TORMTools.GetFieldNameByPropName(OrderItem.PropName)]);
-      if OrderItem.IsDESC then
+      OrderItem := aOrder.OrderItems[i];
+      OrderPart := OrderPart + Format(' `%s`', [TORMTools.GetFieldNameByPropName(OrderItem.FieldName)]);
+      if OrderItem.Direction = odDESC then
         OrderPart := OrderPart + ' DESC';
     end;
   end;
 
   Result := 'SELECT * FROM %s%s%s';
   Result := Format(Result, [FromPart, WherePart, OrderPart]).Trim;
+end;
+
+function TEntityListBase<T>.CanLoadMore(out aFromRec: Integer): Boolean;
+begin
+  Result := FCanLoadMore;
+  if Result then
+    aFromRec := FOffset + FBuilder.Limit;
+end;
+
+procedure TEntityListBase<T>.LoadList;
+var
+  Entity: TEntityAbstract;
+  Instance: TInstance;
+  QueryKeeper: IQueryKeeper;
+begin
+  FBuilder.FromTable(GetEntityClass);
+  QueryKeeper := MakeQueryKeeper;
+  QueryKeeper.Query.SQL.Text := FBuilder.BuildSQL;
+  FBuilder.FillParams(QueryKeeper.Query);
+
+  FDBEngine.OpenQuery(QueryKeeper.Query);
+
+  while not QueryKeeper.Query.EOF do
+  begin
+    Instance := TInstance.Create(QueryKeeper);
+    Entity := GetEntityClass.Create(FDBEngine, Instance);
+    Add(Entity);
+
+    QueryKeeper.Query.Next;
+  end;
+
+  if FBuilder.Limit > 0 then
+    FCanLoadMore := QueryKeeper.Query.RecordCount = FBuilder.Limit;
+end;
+
+procedure TEntityListBase<T>.LoadMore;
+begin
+  if FCanLoadMore then
+  begin
+    FOffset := FOffset + FBuilder.Limit;
+    FBuilder.SetOffset(FOffset);
+    LoadList;
+  end;
 end;
 
 procedure TEntityListBase<T>.Remove(const aIndex: Integer);
@@ -1560,6 +1670,9 @@ begin
     Add(FRecycleBin[i]);
 
   FRecycleBin := [];
+
+  if Assigned(FComparer) then
+    Sort(FComparer);
 end;
 
 procedure TEntityListBase<T>.Remove(const aEntity: T);
@@ -1590,40 +1703,6 @@ end;
 constructor FieldLength.Create(const aLength: Integer);
 begin
   FLength := aLength;
-end;
-
-{ TOrder }
-
-function TOrder.Add(const aPropName: string): POrder;
-var
-  OrderItem: TOrderItem;
-begin
-  OrderItem.IsDESC := False;
-  OrderItem.PropName := aPropName;
-
-  FOrderItems := FOrderItems + [OrderItem];
-
-  Result := @Self;
-end;
-
-function TOrder.AddDESC(const aPropName: string): POrder;
-var
-  OrderItem: TOrderItem;
-begin
-  OrderItem.IsDESC := True;
-  OrderItem.PropName := aPropName;
-
-  FOrderItems := FOrderItems + [OrderItem];
-
-  Result := @Self;
-end;
-
-class function TOrder.New: TOrder;
-var
-  Order: TOrder;
-begin
-  Order.FOrderItems := [];
-  Result := Order;
 end;
 
 { TORMBlob }
@@ -1710,25 +1789,186 @@ begin
   FModifiedStream := aStream;
 end;
 
-{ TQueryKeeper }
+{ TEntityListBuilder }
 
-constructor TQueryKeeper.Create(aQuery: TFDQuery);
+function TEntityListBuilder.AddAndWhere(const aAlias, aPropName: string;
+  const a흎uality: T흎uality; const aParamName: string): IEntityListBuilder;
 begin
-  inherited Create;
+  FQueryBuilder.AddAndWhere(
+    aAlias,
+    TORMTools.GetFieldNameByPropName(aPropName),
+    a흎uality,
+    aParamName
+  );
 
-  FQuery := aQuery;
+  Result := Self;
 end;
 
-destructor TQueryKeeper.Destroy;
+function TEntityListBuilder.AddCount(const aAlias, aPropName,
+  aAsFieldName: string): IEntityListBuilder;
 begin
-  FQuery.Free;
+  FNeedGroupBy := True;
 
+  if aAlias = FAlias then
+    FAgrFields := FAgrFields + [aPropName];
+
+  FQueryBuilder.AddSelectCount(
+    aAlias,
+    TORMTools.GetFieldNameByPropName(aPropName),
+    TORMTools.GetFieldNameByPropName(aAsFieldName)
+  );
+
+  Result := Self;
+end;
+
+function TEntityListBuilder.AddLeftJoin(aEntityClass: TEntityClass;
+  const aAlias: string): IEntityListBuilder;
+var
+  JoinEntItems: TJoinEntItem;
+begin
+  JoinEntItems.Alias := aAlias;
+  JoinEntItems.EntityClass := aEntityClass;
+  JoinEntItems.LeftJoin := True;
+  FJoinEntItems := FJoinEntItems + [JoinEntItems];
+
+  Result := Self;
+end;
+
+function TEntityListBuilder.AddOrderBy(
+  const aOrderItem: TOrderItem): IEntityListBuilder;
+var
+  OrderItem: TOrderItem;
+  Words: TArray<string>;
+begin
+  OrderItem.Alias := aOrderItem.Alias;
+  if aOrderItem.FieldName.Contains('.') then
+  begin
+    Words := aOrderItem.FieldName.Split(['.']);
+    OrderItem.Alias := Words[0];
+    OrderItem.FieldName := Words[1];
+  end
+  else
+    OrderItem.FieldName := TORMTools.GetFieldNameByPropName(aOrderItem.FieldName);
+  OrderItem.Direction := aOrderItem.Direction;
+
+  FQueryBuilder.AddOrderBy(OrderItem);
+
+  Result := Self;
+end;
+
+procedure TEntityListBuilder.AfterConstruction;
+begin
   inherited;
+
+  FQueryBuilder := MakeQueryBuilder;
+  FJoinEntItems := [];
+  FAgrFields := [];
 end;
 
-function TQueryKeeper.GetQuery: TFDQuery;
+function TEntityListBuilder.BuildSQL: string;
 begin
-  Result := FQuery;
+  Result := FQueryBuilder.BuildSQL;
+end;
+
+procedure TEntityListBuilder.FillParams(aQuery: TFDQuery);
+begin
+  FQueryBuilder.FillParams(aQuery);
+end;
+
+function TEntityListBuilder.FromTable(aEntityClass: TEntityClass): IEntityListBuilder;
+var
+  FKey: TFKey;
+  JoinEntItem: TJoinEntItem;
+  Prop: string;
+  PublishedProps: TArray<string>;
+begin
+  if Assigned(FEntityClass) then
+    Exit(Self);
+
+  FEntityClass := aEntityClass;
+  FQueryBuilder.FromTable(aEntityClass.GetTableName, FAlias);
+
+  PublishedProps := GetPublishedProps(aEntityClass);
+  for Prop in PublishedProps do
+    if not FAgrFields.Contains(Prop) then
+      FQueryBuilder.AddSelect(FAlias, TORMTools.GetFieldNameByPropName(Prop));
+
+  for JoinEntItem in FJoinEntItems do
+  begin
+    if JoinEntItem.EntityClass.GetStructure.FKeys.TryGetFKey(aEntityClass, {out}FKey) then
+    begin
+      if JoinEntItem.LeftJoin then
+        FQueryBuilder.AddLeftJoin(
+          JoinEntItem.EntityClass.GetTableName,
+          JoinEntItem.Alias,
+          TORMTools.GetFieldNameByPropName(FKey.PropName),
+          FAlias,
+          TORMTools.GetFieldNameByPropName(FKey.ReferPropName)
+        )
+      else
+        FQueryBuilder.AddJoin(
+          JoinEntItem.EntityClass.GetTableName,
+          JoinEntItem.Alias,
+          TORMTools.GetFieldNameByPropName(FKey.PropName),
+          FAlias,
+          TORMTools.GetFieldNameByPropName(FKey.ReferPropName)
+        );
+    end;
+  end;
+
+  if FNeedGroupBy then
+    for Prop in PublishedProps do
+      if not FAgrFields.Contains(Prop) then
+        FQueryBuilder.AddGroupBy(FAlias, TORMTools.GetFieldNameByPropName(Prop));
+
+  Result := Self;
+end;
+
+function TEntityListBuilder.GetLimit: Integer;
+begin
+  Result := FQueryBuilder.Limit;
+end;
+
+function TEntityListBuilder.GetPublishedProps(aClass: TClass): TArray<string>;
+var
+  RttiContext: TRttiContext;
+  RttiProperties: TArray<TRttiProperty>;
+  RttiProperty: TRttiProperty;
+begin
+  Result := [];
+
+  RttiContext := TRttiContext.Create;
+  try
+    RttiProperties := RttiContext.GetType(aClass).GetProperties;
+    for RttiProperty in RttiProperties do
+      if RttiProperty.Visibility = mvPublished then
+        Result := Result + [RttiProperty.Name];
+  finally
+    RttiContext.Free;
+  end;
+end;
+
+function TEntityListBuilder.SetLimit(const aValue: Integer): IEntityListBuilder;
+begin
+  FQueryBuilder.SetLimit(aValue);
+
+  Result := Self;
+end;
+
+function TEntityListBuilder.SetOffset(
+  const aValue: Integer): IEntityListBuilder;
+begin
+  FQueryBuilder.SetOffset(aValue);
+
+  Result := Self;
+end;
+
+function TEntityListBuilder.SetParam(const aParamName: string;
+  const aValue: Variant): IEntityListBuilder;
+begin
+  FQueryBuilder.SetParam(aParamName, aValue);
+
+  Result := Self;
 end;
 
 end.
