@@ -57,8 +57,24 @@ type
   end;
 {$M-}
 
-  THandleEntityFieldProc = reference to procedure(aRttiProperty: TRttiProperty);
   TTransferData = TDictionary<string, IQueryKeeper>;
+
+  TInitDataItem = record
+    EntityClass: TEntityClass;
+    PropNames: TArray<string>;
+    PropValues: TArray<TArray<Variant>>;
+    procedure Init;
+  end;
+
+  TInitData = record
+  private
+    Data: TArray<TInitDataItem>;
+  public
+    procedure AddInitData(aEntityClass: TEntityClass; const aPropNames: TArray<string>;
+      const aPropValues: TArray<TArray<Variant>>);
+  end;
+
+  THandleEntityFieldProc = reference to procedure(aRttiProperty: TRttiProperty);
 
   TORMService = class
   private
@@ -86,8 +102,10 @@ type
     procedure HandleORMTransferRecord(const aSQLCode: string);
     procedure HandleEntityFields(aEntityProperties: TArray<TRttiProperty>;
       aHandleEntityFieldProc: THandleEntityFieldProc);
+    procedure HandleInitData(aEntityClass: TEntityClass);
   protected
     function FinishTransfer(const aNum: Integer): Boolean;
+    function GetInitData: TInitData; virtual;
     function MakeQuery(const aTableName: string): IQueryKeeper;
     function StartTransfer(const aNum: Integer): Boolean;
     procedure AfterMigrate(aData: TTransferData); virtual;
@@ -175,6 +193,7 @@ end;
 function TORMService.GetFieldDef(aRttiProperty: TRttiProperty): TFieldDef;
 var
   Attribute: TCustomAttribute;
+  NumFieldSize: TArray<string>;
   Words: TArray<string>;
 begin
   Result.Init;
@@ -200,8 +219,19 @@ begin
     Result.SQLType := Words[0];
 
     if not Words[1].Contains(',') then
-      Result.FieldLength := Words[1].ToInteger;
+      Result.FieldLength := Words[1].ToInteger
+    else
+    begin
+      NumFieldSize := Words[1].Split([',']);
+      Result.FieldPrecision := NumFieldSize[0].ToInteger;
+      Result.FieldScale := NumFieldSize[1].ToInteger;
+    end;
   end;
+end;
+
+function TORMService.GetInitData: TInitData;
+begin
+  Result.Data := [];
 end;
 
 class function TORMService.GetMaxDataTransferNum(aDBEngine: TDBEngine): Integer;
@@ -313,7 +343,6 @@ end;
 function TORMService.GetTableDef(const aStructure: TStructure; aORMTable: TORMTable;
   aEntityType: TRttiInstanceType): TTableDef;
 var
-  FieldDef: TFieldDef;
   FieldName: string;
   FKey: TFKey;
   FKeyDef: TFKeyDef;
@@ -456,6 +485,8 @@ begin
       if not Result.IsEmpty then
       begin
         FDBEngine.ExecSQL(Result);
+        if ORMTable.IsNew then
+          HandleInitData(TEntityClass(aEntityType.MetaclassType));
 
         ORMTable.TableName := TableDef.TableName;
         ORMTable.ORMFields.Clear;
@@ -475,6 +506,39 @@ begin
       ORMTable.Free;
     end;
   end;
+end;
+
+procedure TORMService.HandleInitData(aEntityClass: TEntityClass);
+var
+  Entity: TEntityAbstract;
+  i: Integer;
+  InitData: TInitData;
+  InitDataItem: TInitDataItem;
+  PropName: string;
+  PropValues: TArray<Variant>;
+begin
+  InitData := GetInitData;
+
+  for InitDataItem in InitData.Data do
+    if aEntityClass = InitDataItem.EntityClass  then
+      for PropValues in InitDataItem.PropValues do
+      begin
+        if Length(PropValues) <> Length(InitDataItem.PropNames) then
+          raise EORMWrongInputCount.Create;
+
+        Entity := aEntityClass.Create(FDBEngine);
+        try
+          for i := 0 to Length(PropValues) - 1 do
+          begin
+            PropName := InitDataItem.PropNames[i];
+            Entity.Prop[PropName] := PropValues[i];
+          end;
+
+          Entity.Store;
+        finally
+          Entity.Free;
+        end;
+      end;
 end;
 
 procedure TORMService.HandleORMTransferRecord(const aSQLCode: string);
@@ -660,6 +724,28 @@ class function TORMTransfer.GetStructure: TStructure;
 begin
   Result.TableName := 'ORM_TRANSFER';
   Result.PrimaryKey.AddField('Num', TFieldType.ftInteger);
+end;
+
+{ TInitData }
+
+procedure TInitData.AddInitData(aEntityClass: TEntityClass;
+  const aPropNames: TArray<string>; const aPropValues: TArray<TArray<Variant>>);
+var
+  aDataItem: TInitDataItem;
+begin
+  aDataItem.EntityClass := aEntityClass;
+  aDataItem.PropNames := aPropNames;
+  aDataItem.PropValues := aPropValues;
+
+  Data := Data + [aDataItem];
+end;
+
+{ TInitDataItem }
+
+procedure TInitDataItem.Init;
+begin
+  PropNames := [];
+  PropValues := [];
 end;
 
 end.

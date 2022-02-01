@@ -58,7 +58,6 @@ implementation
 
 constructor EORMKeyPropNotExists.Create;
 begin
-
 end;
 
 { EORMWrongInputCount }
@@ -72,7 +71,6 @@ end;
 
 constructor EORMWrongParamName.Create;
 begin
-
 end;
 
 { EORMUniqueIDNotExists }
@@ -109,7 +107,6 @@ end;
 
 constructor EORMPrimaryKeyNotDefined.Create;
 begin
-
 end;
 
 { EORMException }
