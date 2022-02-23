@@ -296,6 +296,9 @@ type
 
   TEntityListBase<T: TEntityAbstract> = class(TEntityListAbstract<T>)
   private
+    type
+      TPostDeleteProc = reference to procedure;
+  private
     FBuilder: IEntityListBuilderImpl;
     FDBEngine: TDBEngine;
     FFKey: TFKey;
@@ -318,6 +321,7 @@ type
     function GetNextRecNum: Integer; virtual;
     procedure Clear;
     procedure Delete(const aEntity: T); overload;
+    procedure Delete(const aEntity: T; aPostDeleteProc: TPostDeleteProc); overload;
     procedure Delete(const aIndex: Integer); overload;
     procedure DeleteAll;
     procedure LoadMore; virtual;
@@ -1662,6 +1666,14 @@ procedure TEntityListBase<T>.Delete(const aIndex: Integer);
 begin
   Items[aIndex].Delete;
   inherited Remove(Items[aIndex]);
+end;
+
+procedure TEntityListBase<T>.Delete(const aEntity: T;
+  aPostDeleteProc: TPostDeleteProc);
+begin
+  aEntity.Delete;
+  aPostDeleteProc;
+  inherited Remove(aEntity);
 end;
 
 procedure TEntityListBase<T>.DeleteAll;
