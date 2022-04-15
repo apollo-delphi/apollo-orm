@@ -208,6 +208,9 @@ begin
 
     if Attribute is FieldLength then
       Result.FieldLength := FieldLength(Attribute).Length;
+
+    if Attribute is DefaultValue then
+      Result.DefaultValue := DefaultValue(Attribute).Value;
   end;
 
   if (Result.SQLType = 'VARCHAR') and (Result.FieldLength = 0) then

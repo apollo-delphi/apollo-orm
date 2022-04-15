@@ -228,6 +228,14 @@ type
   Text = class(TCustomAttribute)
   end;
 
+  DefaultValue = class(TCustomAttribute)
+  private
+    FValue: Variant;
+  public
+    constructor Create(const aValue: Variant);
+    property Value: Variant read FValue;
+  end;
+
 {$M+}
   [SkipStructure]
   TEntityFeatID = class abstract(TEntityAbstract)
@@ -2185,6 +2193,13 @@ begin
   FieldName := '';
   FieldType := ftUnknown;
   Value := Null;
+end;
+
+{ DefaultValue }
+
+constructor DefaultValue.Create(const aValue: Variant);
+begin
+  FValue := aValue;
 end;
 
 end.
