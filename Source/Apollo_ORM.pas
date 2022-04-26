@@ -775,13 +775,12 @@ begin
         aParam.AsFloat := aValue;
     end;
     ftDateTime: aParam.AsDateTime := aValue;
-    //ftBoolean: aParam.AsBoolean := aValue;
     ftString, ftWideString, ftWideMemo, ftBoolean:
     begin
       if aValue = '' then
         aParam.Clear
       else
-        aParam.AsString := aValue;
+        aParam.AsWideString := aValue;
     end;
     ftBlob: aParam.LoadFromStream(GetBlobProp(aPropName).Stream, ftBlob);
   else
