@@ -27,6 +27,7 @@ type
   TPrimaryKey = TArray<TKeyField>;
 
   TPrimaryKeyHelper = record helper for TPrimaryKey
+    function Contains(const aPropName: string): Boolean;
     function TryGetKeyField(const aPropName: string; out aKeyField: TKeyField): Boolean;
     procedure AddField(const aPropName: string; const aFieldType: TFieldType);
   end;
@@ -1466,6 +1467,13 @@ begin
   Self := Self + [KeyField];
 end;
 
+function TPrimaryKeyHelper.Contains(const aPropName: string): Boolean;
+var
+  KeyField: TKeyField;
+begin
+  Result := TryGetKeyField(aPropName, {out}KeyField);
+end;
+
 function TPrimaryKeyHelper.TryGetKeyField(const aPropName: string; out aKeyField: TKeyField): Boolean;
 var
   KeyField: TKeyField;
@@ -1544,7 +1552,7 @@ function TFKeysHelper.Contains(const aPropName: string): Boolean;
 var
   FKey: TFKey;
 begin
-  Result := TryGetFKey(aPropName, FKey);
+  Result := TryGetFKey(aPropName, {out}FKey);
 end;
 
 function TFKeysHelper.TryGetFKey(aReferEntityClass: TEntityClass;

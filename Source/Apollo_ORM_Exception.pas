@@ -52,6 +52,13 @@ type
     constructor Create;
   end;
 
+  EORMInitDataPrimaryKeyNotDefined = class(EORMException)
+  protected
+    function GetErrorMsg(aEntityClass: TEntityClass; const aPropName: string): string; override;
+  public
+    constructor Create(aEntityClass: TEntityClass);
+  end;
+
 implementation
 
 { EORMPropNotExists }
@@ -130,6 +137,19 @@ function EORMTableNameNotDefined.GetErrorMsg(aEntityClass: TEntityClass;
   const aPropName: string): string;
 begin
   Result := Format('Class %s: table name is not defined in the GetStructure function', [aEntityClass.ClassName]);
+end;
+
+{ EORMInitDataPrimaryKeyNotDefined }
+
+constructor EORMInitDataPrimaryKeyNotDefined.Create(aEntityClass: TEntityClass);
+begin
+  inherited Create(aEntityClass, '');
+end;
+
+function EORMInitDataPrimaryKeyNotDefined.GetErrorMsg(
+  aEntityClass: TEntityClass; const aPropName: string): string;
+begin
+  Result := Format('Primary key did not find in Entity %s data initialization', [aEntityClass.ClassName]);
 end;
 
 end.

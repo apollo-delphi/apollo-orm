@@ -78,6 +78,7 @@ type
 
   TORMService = class
   private
+    FDataInitialized: Boolean;
     FDBEngine: TDBEngine;
     FMaxDataTransferNum: Integer;
     FNextMaxDataTransferNum: Integer;
@@ -488,8 +489,6 @@ begin
       if not Result.IsEmpty then
       begin
         FDBEngine.ExecSQL(Result);
-        if ORMTable.IsNew then
-          HandleInitData(TEntityClass(aEntityType.MetaclassType));
 
         ORMTable.TableName := TableDef.TableName;
         ORMTable.ORMFields.Clear;
@@ -505,6 +504,8 @@ begin
 
         ORMTable.StoreAll;
       end;
+
+      HandleInitData(TEntityClass(aEntityType.MetaclassType));
     finally
       ORMTable.Free;
     end;
@@ -517,6 +518,9 @@ var
   i: Integer;
   InitData: TInitData;
   InitDataItem: TInitDataItem;
+  NeedToStore: Boolean;
+  PKeyIndexes: TArray<Integer>;
+  PKeyValues: TArray<Variant>;
   PropName: string;
   PropValues: TArray<Variant>;
 begin
@@ -524,24 +528,49 @@ begin
 
   for InitDataItem in InitData.Data do
     if aEntityClass = InitDataItem.EntityClass  then
+    begin
+      PKeyIndexes := [];
+      for i := 0 to InitDataItem.PropNames.Count - 1 do
+      begin
+        if aEntityClass.GetPrimaryKey.Contains(InitDataItem.PropNames[i]) then
+          PKeyIndexes := PKeyIndexes + [i];
+      end;
+
+      if PKeyIndexes.Count = 0 then
+        raise EORMInitDataPrimaryKeyNotDefined.Create(aEntityClass);
+
       for PropValues in InitDataItem.PropValues do
       begin
         if Length(PropValues) <> Length(InitDataItem.PropNames) then
           raise EORMWrongInputCount.Create;
 
-        Entity := aEntityClass.Create(FDBEngine);
+        PKeyValues := [];
+        for i := 0 to PKeyIndexes.Count - 1 do
+          PKeyValues := PKeyValues + [PropValues[PKeyIndexes[i]]];
+
+        NeedToStore := False;
+        Entity := aEntityClass.Create(FDBEngine, PKeyValues);
         try
           for i := 0 to Length(PropValues) - 1 do
           begin
             PropName := InitDataItem.PropNames[i];
-            Entity.Prop[PropName] := PropValues[i];
+            if Entity.Prop[PropName] <> PropValues[i] then
+            begin
+              Entity.Prop[PropName] := PropValues[i];
+              NeedToStore := True;
+            end;
           end;
 
-          Entity.Store;
+          if NeedToStore then
+          begin
+            Entity.Store;
+            FDataInitialized := True;
+          end;
         finally
           Entity.Free;
         end;
       end;
+    end;
 end;
 
 procedure TORMService.HandleORMTransferRecord(const aSQLCode: string);
@@ -649,7 +678,7 @@ begin
         end;
       end;
 
-      if SQLList.Count > 0 then
+      if (SQLList.Count > 0) or FDataInitialized then
       begin
         AfterMigrate(FTransferData);
         HandleORMTransferRecord(SQLList.Text);
