@@ -85,6 +85,7 @@ type
     FRttiContext: TRttiContext;
     FTransferData: TTransferData;
     function GetFieldDef(aRttiProperty: TRttiProperty): TFieldDef;
+    function GetMaxDataTransferNum(aDBEngine: TDBEngine): Integer;
     function GetORMDef(aEntityClass: TEntityClass): TTableDef;
     function GetORMTable(const aORMUniqueID: string): TORMTable;
     function GetORMUniqueID(aRttiObject: TRttiObject): string;
@@ -104,6 +105,7 @@ type
     procedure HandleEntityFields(aEntityProperties: TArray<TRttiProperty>;
       aHandleEntityFieldProc: THandleEntityFieldProc);
     procedure HandleInitData(aEntityClass: TEntityClass);
+    procedure InitCurrentTransferNum;
   protected
     function FinishTransfer(const aNum: Integer): Boolean;
     function GetInitData: TInitData; virtual;
@@ -112,8 +114,7 @@ type
     procedure AfterMigrate(aData: TTransferData); virtual;
     procedure BeforeMigrate(aData: TTransferData); virtual;
   public
-    class function GetMaxDataTransferNum(aDBEngine: TDBEngine): Integer;
-    class function NeedToFirstMigrate(aDBEngine: TDBEngine): Boolean;
+    function NeedToMigrate(aDBEngine: TDBEngine): Boolean;
     procedure Migrate(aDBEngine: TDBEngine);
     constructor Create;
     destructor Destroy; override;
@@ -149,10 +150,12 @@ end;
 
 procedure TORMService.AfterMigrate(aData: TTransferData);
 begin
+  //0;
 end;
 
 procedure TORMService.BeforeMigrate(aData: TTransferData);
 begin
+  StartTransfer(0);
 end;
 
 constructor TORMService.Create;
@@ -238,7 +241,7 @@ begin
   Result.Data := [];
 end;
 
-class function TORMService.GetMaxDataTransferNum(aDBEngine: TDBEngine): Integer;
+function TORMService.GetMaxDataTransferNum(aDBEngine: TDBEngine): Integer;
 var
   QueryKeeper: IQueryKeeper;
 begin
@@ -253,6 +256,15 @@ begin
     Result := QueryKeeper.Query.Fields[0].AsInteger
   else
     Result := -1;
+end;
+
+function TORMService.NeedToMigrate(aDBEngine: TDBEngine): Boolean;
+begin
+  FDBEngine := aDBEngine;
+  InitCurrentTransferNum;
+  BeforeMigrate(nil);
+
+  Result := FNextMaxDataTransferNum > FMaxDataTransferNum;
 end;
 
 function TORMService.TryGetIndexDef(aRttiProperty: TRttiProperty; out aIndexDef: TIndexDef): Boolean;
@@ -356,7 +368,7 @@ begin
   TableDef.Init;
 
   if aStructure.TableName.IsEmpty then
-    raise EORMTableNameNotDefined.Create(TEntityClass(aEntityType.MetaclassType));
+    raise EORMTableNameNotDefined.Create(aStructure.TableName);
 
   TableDef.TableName := aStructure.TableName.ToUpper;
   if Assigned(aORMTable) then
@@ -598,19 +610,23 @@ end;
 
 function TORMService.HandleTransferNum(const aNum: Integer): Boolean;
 begin
+  Result := False;
+
   if FMaxDataTransferNum = -1 then
-  begin
-    Result := False;
-    FNextMaxDataTransferNum := Max(aNum, FNextMaxDataTransferNum);
-  end
+    FNextMaxDataTransferNum := Max(aNum, FNextMaxDataTransferNum)
   else
   if aNum > FMaxDataTransferNum then
   begin
-    Result := True;
+    if Assigned(FTransferData) then
+      Result := True;
     FNextMaxDataTransferNum := Max(aNum, FNextMaxDataTransferNum);
-  end
-  else
-    Result := False;
+  end;
+end;
+
+procedure TORMService.InitCurrentTransferNum;
+begin
+  FMaxDataTransferNum := GetMaxDataTransferNum(FDBEngine);
+  FNextMaxDataTransferNum := FMaxDataTransferNum;
 end;
 
 function TORMService.IsAbstract(aRttiObject: TRttiObject): Boolean;
@@ -662,8 +678,7 @@ begin
     FDBEngine.TransactionStart;
     try
       CreateORMTablesIfNotExist;
-      FMaxDataTransferNum := GetMaxDataTransferNum(FDBEngine);
-      FNextMaxDataTransferNum := FMaxDataTransferNum;
+      InitCurrentTransferNum;
 
       BeforeMigrate(FTransferData);
 
@@ -699,11 +714,6 @@ begin
     FTransferData.Free;
     SQLList.Free;
   end;
-end;
-
-class function TORMService.NeedToFirstMigrate(aDBEngine: TDBEngine): Boolean;
-begin
-  Result := GetMaxDataTransferNum(aDBEngine) = -1;
 end;
 
 function TORMService.StartTransfer(const aNum: Integer): Boolean;

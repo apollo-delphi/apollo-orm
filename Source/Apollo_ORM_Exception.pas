@@ -20,9 +20,9 @@ type
     function GetErrorMsg(aEntityClass: TEntityClass; const aPropName: string): string; override;
   end;
 
-  EORMTableNameNotDefined = class(EORMException)
-  protected
-    function GetErrorMsg(aEntityClass: TEntityClass; const aPropName: string): string; override;
+  EORMTableNameNotDefined = class(Exception)
+  public
+    constructor Create(const aClassName: string);
   end;
 
   EORMWrongInputCount = class(Exception)
@@ -131,14 +131,6 @@ begin
   Result := Format('Class %s: override GetStructure function or set [SkipStructure] attribute', [aEntityClass.ClassName]);
 end;
 
-{ EORMTableNameNotDefined }
-
-function EORMTableNameNotDefined.GetErrorMsg(aEntityClass: TEntityClass;
-  const aPropName: string): string;
-begin
-  Result := Format('Class %s: table name is not defined in the GetStructure function', [aEntityClass.ClassName]);
-end;
-
 { EORMInitDataPrimaryKeyNotDefined }
 
 constructor EORMInitDataPrimaryKeyNotDefined.Create(aEntityClass: TEntityClass);
@@ -150,6 +142,13 @@ function EORMInitDataPrimaryKeyNotDefined.GetErrorMsg(
   aEntityClass: TEntityClass; const aPropName: string): string;
 begin
   Result := Format('Primary key did not find in Entity %s data initialization', [aEntityClass.ClassName]);
+end;
+
+{ EORMTableNameNotDefined }
+
+constructor EORMTableNameNotDefined.Create(const aClassName: string);
+begin
+  inherited CreateFmt('Class %s: table name is not defined in the GetStructure function', [aClassName]);
 end;
 
 end.
