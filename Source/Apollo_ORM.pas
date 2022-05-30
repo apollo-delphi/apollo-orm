@@ -2114,8 +2114,9 @@ function TEntitySelectBuilder.BuildSQL: string;
 
   procedure AddToSelectAndGroupBy(aEntityClass: TEntityClass; const aAlias: string);
   var
+    FieldName: string;
+    FieldNameWithAlias: string;
     Prop: string;
-    PropWithAlias: string;
     PublishedProps: TArray<string>;
   begin
     PublishedProps := TORMTools.GetPublishedProps(aEntityClass);
@@ -2123,12 +2124,13 @@ function TEntitySelectBuilder.BuildSQL: string;
     begin
       if not FAgrFields.Contains(Prop) then
       begin
-        PropWithAlias := Format('%s$%s', [aAlias, Prop]);
+        FieldName := TORMTools.GetFieldNameByPropName(Prop);
+        FieldNameWithAlias := Format('%s$%s', [aAlias, FieldName]);
 
-        FQueryBuilder.AddSelect(aAlias, TORMTools.GetFieldNameByPropName(Prop), PropWithAlias);
+        FQueryBuilder.AddSelect(aAlias, FieldName, FieldNameWithAlias);
 
         if FNeedGroupBy then
-          FQueryBuilder.AddGroupBy(aAlias, TORMTools.GetFieldNameByPropName(PropWithAlias));
+          FQueryBuilder.AddGroupBy(aAlias, FieldNameWithAlias);
       end;
     end;
   end;
