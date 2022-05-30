@@ -112,6 +112,7 @@ type
   end;
 
   TForEachBlobProp = reference to procedure(aBlob: TORMBlob);
+  TForEachHardJoindEntity = reference to procedure(aEntityClass: TEntityClass);
   TCreateListFunc<T> = reference to function: T;
 
 {$M+}
@@ -126,7 +127,6 @@ type
     FOwner: TEntityAbstract;
     FRevertListProcs: TSimpleMethods;
     FStoreListProcs: TSimpleMethods;
-    class function GetHardJoinedEntityClasses: TArray<TEntityClass>;
     function CreateJoinedEntity(aEntityClass: TEntityClass; const aKeyPropName,
       aReferPropName: string): TEntityAbstract;
     function GetBlobProp(const aPropName: string): TORMBlob;
@@ -151,6 +151,8 @@ type
     procedure ExecToDB(const aSQL: string);
     procedure FillParam(aParam: TFDParam; const aPropName: string; aValue: Variant);
     procedure ForEachBlobProp(aForEachBlobProp: TForEachBlobProp);
+    procedure ForEachHardJoinedEntity(aEntityClass: TEntityClass;
+      aForEachHardJoindEntity: TForEachHardJoindEntity);
     procedure FreeBlobProps;
     procedure FreeFInstance;
     procedure FreeJoinedEntities;
@@ -302,7 +304,7 @@ type
     function GetLimit: Integer;
     function GetOffset: Integer;
     procedure FillParams(aQuery: TFDQuery);
-    procedure RecursivelyJoinEntities(aEntityClass: TEntityClass);
+    procedure JoinEntity(aEntityClass: TEntityClass);
     property Limit: Integer read GetLimit;
     property Offset: Integer read GetOffset;
   end;
@@ -395,7 +397,7 @@ type
     function SetOffset(const aValue: Integer): IEntitySelectBuilder;
     function SetParam(const aParamName: string; const aValue: Variant): IEntitySelectBuilder;
     procedure FillParams(aQuery: TFDQuery);
-    procedure RecursivelyJoinEntities(aEntityClass: TEntityClass);
+    procedure JoinEntity(aEntityClass: TEntityClass);
   public
     procedure AfterConstruction; override;
   end;
@@ -813,6 +815,49 @@ begin
     end;
 end;
 
+procedure TEntityAbstract.ForEachHardJoinedEntity(aEntityClass: TEntityClass;
+  aForEachHardJoindEntity: TForEachHardJoindEntity);
+var
+  RttiContext: TRttiContext;
+
+  function GetHardJoinedEntityClasses(aEntityClass: TEntityClass): TArray<TEntityClass>;
+  var
+    FKey: TFKey;
+    FKeys: TFKeys;
+    RttiProperties: TArray<TRttiProperty>;
+    RttiProperty: TRttiProperty;
+  begin
+    Result := [];
+    FKeys := aEntityClass.GetStructure.FKeys;
+
+    for FKey in FKeys do
+    begin
+      RttiProperties := RttiContext.GetType(aEntityClass.ClassInfo).GetProperties;
+      for RttiProperty in RttiProperties do
+        if RttiProperty.PropertyType.IsInstance and
+          (RttiProperty.PropertyType.AsInstance.MetaclassType  = FKey.ReferEntityClass)
+        then
+          Result := Result + [FKey.ReferEntityClass];
+    end;
+  end;
+
+var
+  HardJoinedEntitiyClasses: TArray<TEntityClass>;
+  HardJoinedEntityClass: TEntityClass;
+begin
+  RttiContext := TRttiContext.Create;
+  try
+    HardJoinedEntitiyClasses := GetHardJoinedEntityClasses(aEntityClass);
+    for HardJoinedEntityClass in HardJoinedEntitiyClasses do
+    begin
+      aForEachHardJoindEntity(HardJoinedEntityClass);
+      ForEachHardJoinedEntity(HardJoinedEntityClass, aForEachHardJoindEntity);
+    end;
+  finally
+    RttiContext.Free;
+  end;
+end;
+
 procedure TEntityAbstract.FreeBlobProps;
 begin
   ForEachBlobProp(
@@ -853,33 +898,6 @@ end;
 function TEntityAbstract.GetDeleteSQL: string;
 begin
   Result := Format('DELETE FROM %s WHERE %s', [GetTableName, GetWherePart]);
-end;
-
-class function TEntityAbstract.GetHardJoinedEntityClasses: TArray<TEntityClass>;
-var
-  FKey: TFKey;
-  FKeys: TFKeys;
-  RttiContext: TRttiContext;
-  RttiProperties: TArray<TRttiProperty>;
-  RttiProperty: TRttiProperty;
-begin
-  Result := [];
-  FKeys := GetStructure.FKeys;
-
-  RttiContext := TRttiContext.Create;
-  try
-    for FKey in FKeys do
-    begin
-      RttiProperties := RttiContext.GetType(ClassInfo).GetProperties;
-      for RttiProperty in RttiProperties do
-        if RttiProperty.PropertyType.IsInstance and
-          (RttiProperty.PropertyType.AsInstance.MetaclassType  = FKey.ReferEntityClass)
-        then
-          Result := Result + [FKey.ReferEntityClass];
-    end;
-  finally
-    RttiContext.Free;
-  end;
 end;
 
 function TEntityAbstract.GetInsertSQL: string;
@@ -1078,7 +1096,12 @@ var
   KeyField: TKeyField;
 begin
   Builder := MakeEntitySelectBuilder('T') as IEntitySelectBuilderImpl;
-  Builder.RecursivelyJoinEntities(GetClassType);
+  ForEachHardJoinedEntity(GetClassType,
+    procedure(aEntityClass: TEntityClass)
+    begin
+      Builder.JoinEntity(aEntityClass);
+    end
+  );
 
   for KeyField in GetPrimaryKey do
     Builder.AddAndWhere('T', KeyField.PropName, eEquals, 'OLD_' + KeyField.PropName);
@@ -2114,8 +2137,9 @@ function TEntitySelectBuilder.BuildSQL: string;
 
   procedure AddToSelectAndGroupBy(aEntityClass: TEntityClass; const aAlias: string);
   var
+    FieldName: string;
+    FieldNameWithAlias: string;
     Prop: string;
-    PropWithAlias: string;
     PublishedProps: TArray<string>;
   begin
     PublishedProps := TORMTools.GetPublishedProps(aEntityClass);
@@ -2123,12 +2147,13 @@ function TEntitySelectBuilder.BuildSQL: string;
     begin
       if not FAgrFields.Contains(Prop) then
       begin
-        PropWithAlias := Format('%s$%s', [aAlias, Prop]);
+        FieldName := TORMTools.GetFieldNameByPropName(Prop);
+        FieldNameWithAlias := Format('%s$%s', [aAlias, FieldName]);
 
-        FQueryBuilder.AddSelect(aAlias, TORMTools.GetFieldNameByPropName(Prop), PropWithAlias);
+        FQueryBuilder.AddSelect(aAlias, FieldName, FieldNameWithAlias);
 
         if FNeedGroupBy then
-          FQueryBuilder.AddGroupBy(aAlias, TORMTools.GetFieldNameByPropName(PropWithAlias));
+          FQueryBuilder.AddGroupBy(aAlias, FieldNameWithAlias);
       end;
     end;
   end;
@@ -2212,19 +2237,12 @@ begin
   Result := FQueryBuilder.Offset;
 end;
 
-procedure TEntitySelectBuilder.RecursivelyJoinEntities(aEntityClass: TEntityClass);
-var
-  HardJoinedEntitiyClasses: TArray<TEntityClass>;
-  HardJoinedEntityClass: TEntityClass;
+procedure TEntitySelectBuilder.JoinEntity(aEntityClass: TEntityClass);
 begin
   if not Assigned(FEntityClass) then
     FromTable(aEntityClass)
   else
     AddLeftJoin(aEntityClass, Format('T%d', [Length(FJoinEntItems) + 1]));
-
-  HardJoinedEntitiyClasses := aEntityClass.GetHardJoinedEntityClasses;
-  for HardJoinedEntityClass in HardJoinedEntitiyClasses do
-    RecursivelyJoinEntities(HardJoinedEntityClass);
 end;
 
 function TEntitySelectBuilder.SetLimit(const aValue: Integer): IEntitySelectBuilder;
