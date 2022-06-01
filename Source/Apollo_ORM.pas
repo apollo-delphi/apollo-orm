@@ -365,21 +365,22 @@ type
   TForEachHardJoindEntity = reference to procedure(var aHardJoinedPropData: THardJoinedPropData);
 
   THardJoinTool = record
-  strict private
-    class function GetAlias(const aIndex: Integer): string; static;
-    class procedure DoForEachJoinedEntity(aEntityClass: TEntityClass;
-      aForEachHardJoindEntity: TForEachHardJoindEntity; var aIndex: Integer;
-      var aOwnerAlias: string); static;
   private
     class function GetInstances(aQueryKeeper: IQueryKeeper; const aPrimaryKey: TPrimaryKey;
       const aAlias: string): TArray<TInstance>; static;
-    class procedure ForEachJoinedEntity(aEntityClass: TEntityClass;
-      aForEachHardJoindEntity: TForEachHardJoindEntity); static;
   end;
 
   THardJoinEngine = class
+  strict private
+    FHardJoinedPropData: TArray<THardJoinedPropData>;
+    function GetAlias(const aIndex: Integer): string;
+    procedure ForEachJoinedEntity(aEntityClass: TEntityClass;
+      aForEachHardJoindEntity: TForEachHardJoindEntity; var aIndex: Integer;
+      var aOwnerAlias: string);
   private
-    procedure BuildRecursiveJoin(aRootEntityClass: TEntityClass; aBuilder: IEntitySelectBuilderImpl);
+    procedure RecursiveBuildJoin(aRootEntityClass: TEntityClass; aBuilder: IEntitySelectBuilderImpl);
+    procedure RecursiveCreateEntityList(aEntityList: TObject;
+      aEntityClass: TEntityClass; aQueryKeeper: IQueryKeeper; aDBEngine: TDBEngine);
   end;
 
   function MakeEntitySelectBuilder(const aAlias: string): IEntitySelectBuilder;
@@ -1106,7 +1107,7 @@ begin
   Builder := MakeEntitySelectBuilder('T') as IEntitySelectBuilderImpl;
   Builder.FromTable(GetClassType);
 
-  THardJoinTool.ForEachJoinedEntity(GetClassType,
+  {THardJoinTool.ForEachJoinedEntity(GetClassType,
     procedure(var aHardJoinedPropData: THardJoinedPropData)
     var
       Alias: string;
@@ -1115,7 +1116,7 @@ begin
       Builder.AddLeftJoin(aHardJoinedPropData.EntityClass, Alias);
       Aliases := Aliases + [Alias];
     end
-  );
+  );}
 
   for KeyField in GetPrimaryKey do
     Builder.AddAndWhere('T', KeyField.PropName, eEquals, 'OLD_' + KeyField.PropName);
@@ -1276,7 +1277,7 @@ begin
     FInstance := TInstance.Create(QueryKeeper, 'T');
     FInstance.SetEntity(Self);
 
-    THardJoinTool.ForEachJoinedEntity(GetClassType,
+    {THardJoinTool.ForEachJoinedEntity(GetClassType,
       procedure(var aHardJoinedPropData: THardJoinedPropData)
       var
         Alias: string;
@@ -1285,7 +1286,7 @@ begin
         HardJoinedEntity := CreateHardJoinedEntity(QueryKeeper, Alias, aHardJoinedPropData.EntityClass);
         aHardJoinedPropData.InstanceProperty.SetValue(Self, HardJoinedEntity);
       end
-    );
+    );}
   finally
     gRttiContext.Free;
   end;
@@ -1883,18 +1884,22 @@ begin
   gRttiContext := TRttiContext.Create;
   HardJoinEngine := THardJoinEngine.Create;
   try
-    QueryKeeper := MakeQueryKeeper;
-    HardJoinEngine.BuildRecursiveJoin(GetEntityClass, FBuilder);
+    FBuilder.FromTable(GetEntityClass);
+    HardJoinEngine.RecursiveBuildJoin(GetEntityClass, FBuilder);
 
     sSQL := FBuilder.BuildSQL;
     if sSQL.IsEmpty then
       Exit;
 
+    QueryKeeper := MakeQueryKeeper;
     QueryKeeper.Query.SQL.Text := sSQL;
     FBuilder.FillParams(QueryKeeper.Query);
 
     FDBEngine.OpenQuery(QueryKeeper.Query);
-    Instances := THardJoinTool.GetInstances(QueryKeeper, GetEntityClass.GetPrimaryKey, 'T');
+    HardJoinEngine.RecursiveCreateEntityList(Self, GetEntityClass, QueryKeeper, FDBEngine);
+
+
+    {Instances := THardJoinTool.GetInstances(QueryKeeper, GetEntityClass.GetPrimaryKey, 'T');
     for Instance in Instances do
     begin
       Entity := GetEntityClass.CreateByInstance(FDBEngine, Instance);
@@ -1922,7 +1927,7 @@ begin
           aHardJoinedPropData.InstanceProperty.SetValue(aHardJoinedPropData.Owner, Entity);
         end;
       end
-    );
+    );}
 
     if Assigned(FBuilder) and (FBuilder.Limit > 0) then
       FCanLoadMore := QueryKeeper.Query.RecordCount = FBuilder.Limit;
@@ -2412,11 +2417,6 @@ end;
 
 {THardJoinTool}
 
-class function THardJoinTool.GetAlias(const aIndex: Integer): string;
-begin
-  Result := Format('T%d', [aIndex]);
-end;
-
 class function THardJoinTool.GetInstances(aQueryKeeper: IQueryKeeper;
   const aPrimaryKey: TPrimaryKey; const aAlias: string): TArray<TInstance>;
 
@@ -2459,7 +2459,17 @@ begin
   end;
 end;
 
-class procedure THardJoinTool.DoForEachJoinedEntity(aEntityClass: TEntityClass;
+{ THardJoinEngine }
+
+function THardJoinEngine.GetAlias(const aIndex: Integer): string;
+begin
+  if aIndex = 0 then
+    Result := 'T'
+  else
+    Result := Format('T%d', [aIndex]);
+end;
+
+procedure THardJoinEngine.ForEachJoinedEntity(aEntityClass: TEntityClass;
   aForEachHardJoindEntity: TForEachHardJoindEntity; var aIndex: Integer;
   var aOwnerAlias: string);
 
@@ -2556,54 +2566,82 @@ var
   i: Integer;
 begin
   HardJoinedPropDataArr := GetHardJoinedEntityDataArr(aEntityClass);
-    for i := 0 to Length(HardJoinedPropDataArr) - 1 do
-    begin
-      Inc(aIndex);
-      HardJoinedPropDataArr[i].Index := aIndex;
-      HardJoinedPropDataArr[i].Alias := GetAlias(aIndex);
-      HardJoinedPropDataArr[i].OwnerAlias := aOwnerAlias;
 
-      aForEachHardJoindEntity({var}HardJoinedPropDataArr[i]);
+  for i := 0 to Length(HardJoinedPropDataArr) - 1 do
+  begin
+    Inc(aIndex);
 
-      DoForEachJoinedEntity(
-        HardJoinedPropDataArr[i].EntityClass,
-        aForEachHardJoindEntity,
-        aIndex,
-        HardJoinedPropDataArr[i].Alias
-      );
-    end;
+    HardJoinedPropDataArr[i].Index := aIndex;
+    HardJoinedPropDataArr[i].Alias := GetAlias(aIndex);
+    HardJoinedPropDataArr[i].OwnerAlias := aOwnerAlias;
+
+    aForEachHardJoindEntity({var}HardJoinedPropDataArr[i]);
+
+    ForEachJoinedEntity(
+      HardJoinedPropDataArr[i].EntityClass,
+      aForEachHardJoindEntity,
+      aIndex,
+      HardJoinedPropDataArr[i].Alias
+    );
+  end;
+
+  FHardJoinedPropData := FHardJoinedPropData + HardJoinedPropDataArr;
 end;
 
-class procedure THardJoinTool.ForEachJoinedEntity(aEntityClass: TEntityClass;
-  aForEachHardJoindEntity: TForEachHardJoindEntity);
+procedure THardJoinEngine.RecursiveBuildJoin(aRootEntityClass: TEntityClass;
+  aBuilder: IEntitySelectBuilderImpl);
 var
+  HardJoinedPropData: THardJoinedPropData;
   Index: Integer;
   OwnerAlias: string;
 begin
   Index := 0;
   OwnerAlias := '';
 
-  DoForEachJoinedEntity(
-    aEntityClass,
-    aForEachHardJoindEntity,
+  HardJoinedPropData.Init;
+  HardJoinedPropData.Index := Index;
+  HardJoinedPropData.Alias := GetAlias(Index);
+  HardJoinedPropData.EntityClass := aRootEntityClass;
+  FHardJoinedPropData := [HardJoinedPropData];
+
+  ForEachJoinedEntity(
+    aRootEntityClass,
+    procedure(var aHardJoinedPropData: THardJoinedPropData)
+    begin
+      aBuilder.AddLeftJoin(aHardJoinedPropData.EntityClass, aHardJoinedPropData.Alias, aHardJoinedPropData.OwnerAlias);
+    end,
     {var}Index,
     {var}OwnerAlias
   );
 end;
 
-{ THardJoinEngine }
-
-procedure THardJoinEngine.BuildRecursiveJoin(aRootEntityClass: TEntityClass;
-  aBuilder: IEntitySelectBuilderImpl);
+procedure THardJoinEngine.RecursiveCreateEntityList(aEntityList: TObject;
+  aEntityClass: TEntityClass; aQueryKeeper: IQueryKeeper; aDBEngine: TDBEngine);
+var
+  Entity: TEntityAbstract;
+  i: Integer;
+  Instance: TInstance;
+  Instances: TArray<TInstance>;
+  Hash: string;
 begin
+  aQueryKeeper.Query.First;
+  while not aQueryKeeper.Query.EOF do
+  begin
+    for i := 0 to Length(FHardJoinedPropData) - 1 do
+    begin
+      Hash := GetHash(aQueryKeeper.Query, FHardJoinedPropData[i].EntityClass.GetPrimaryKey, FHardJoinedPropData[i].Alias);
 
-    THardJoinTool.ForEachJoinedEntity(GetEntityClass,
-      procedure(var aHardJoinedPropData: THardJoinedPropData)
+      if not Instances.ContainHash(Hash) then
       begin
-        FBuilder.AddLeftJoin(aHardJoinedPropData.EntityClass, aHardJoinedPropData.Alias, aHardJoinedPropData.OwnerAlias);
-      end
-    );
+        Instance := TInstance.Create(aQueryKeeper, FHardJoinedPropData[i].Alias);
+        Instance.Hash := Hash;
 
+        Instances := Instances + [Instance];
+      end;
+    end;
+
+    aQueryKeeper.Query.Next;
+  end;
 end;
 
 end.
