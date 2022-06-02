@@ -69,8 +69,13 @@ type
 
   TInstance = class
   strict private
+    FEntClassName: string;
     FEntity: TEntityAbstract;
     FFields: TArray<TInstanceField>;
+    FHash: string;
+    FOwnerClassName: string;
+    FOwnerEntClassName: string;
+    FOwnerPropName: string;
     FQueryKeeper: IQueryKeeper;
   private
     function Count: Integer;
@@ -80,8 +85,17 @@ type
     function GetFieldByName(const aFieldName: string): TInstanceField;
     procedure ForEachField(const aModifiedOnly: Boolean; aCallbackProc: TForEachInstanceFieldProc);
     procedure SetEntity(aEntity: TEntityAbstract);
+    property EntClassName: string read FEntClassName write FEntClassName;
     property Fields: TArray<TInstanceField> read FFields write FFields;
+    property Hash: string read FHash write FHash;
+    property OwnerClassName: string read FOwnerClassName write FOwnerClassName;
+    property OwnerEntClassName: string read FOwnerEntClassName write FOwnerEntClassName;
+    property OwnerPropName: string read FOwnerPropName write FOwnerPropName;
     constructor Create(aQueryKeeper: IQueryKeeper; const aAlias: string = ''); overload;
+  end;
+
+  TInstancesHelper = record helper for TArray<TInstance>
+    function ContainHash(const aHash: string): Boolean;
   end;
 
   TORMTools = record
@@ -281,6 +295,7 @@ type
   public
     class function GetEntityClass: TEntityClass;
     constructor Create(aOwnsObjects: Boolean = True); reintroduce;
+    constructor CreateInBuilder;
   end;
 
   IEntitySelectBuilder = interface
@@ -354,33 +369,31 @@ type
   THardJoinedPropData = record
     Alias: string;
     EntityClass: TEntityClass;
-    EntityListClass: TClass;
     Index: Integer;
-    InstanceProperty: TRttiInstanceProperty;
-    Owner: TEntityAbstract;
     OwnerAlias: string;
+    OwnerClass: TClass;
+    OwnerEntityClass: TClass;
+    OwnerPropName: string;
     procedure Init;
   end;
 
   TForEachHardJoindEntity = reference to procedure(var aHardJoinedPropData: THardJoinedPropData);
 
-  THardJoinTool = record
-  private
-    class function GetInstances(aQueryKeeper: IQueryKeeper; const aPrimaryKey: TPrimaryKey;
-      const aAlias: string): TArray<TInstance>; static;
-  end;
-
   THardJoinEngine = class
   strict private
     FHardJoinedPropData: TArray<THardJoinedPropData>;
     function GetAlias(const aIndex: Integer): string;
+    function GetHash(aQuery: TFDQuery; const aPrimaryKey: TPrimaryKey; const aAlias: string): string;
+    function IsEntityClass(aClass: TClass; out aEntityClass: TEntityClass): Boolean;
+    function IsEntityListClass(aClass: TClass; out aEntityClass: TEntityClass): Boolean;
     procedure ForEachJoinedEntity(aEntityClass: TEntityClass;
       aForEachHardJoindEntity: TForEachHardJoindEntity; var aIndex: Integer;
       var aOwnerAlias: string);
   private
+    class function GetFieldNameWithAlias(const aAlias, aPropName: string): string;
+    function EncodeInstancesFromQuery(aQueryKeeper: IQueryKeeper): TArray<TInstance>;
+    procedure DecodeInstancesToEntities(aDBEngine: TDBEngine; aRootOwner: TObject; const aInstances: TArray<TInstance>);
     procedure RecursiveBuildJoin(aRootEntityClass: TEntityClass; aBuilder: IEntitySelectBuilderImpl);
-    procedure RecursiveCreateEntityList(aEntityList: TObject;
-      aEntityClass: TEntityClass; aQueryKeeper: IQueryKeeper; aDBEngine: TDBEngine);
   end;
 
   function MakeEntitySelectBuilder(const aAlias: string): IEntitySelectBuilder;
@@ -1241,7 +1254,7 @@ procedure TEntityAbstract.ReadInstance(const aPKeyValues: TArray<Variant>);
 var
   Aliases: TArray<string>;
   dsQuery: TFDQuery;
-  HardJoinedEntity: TEntityAbstract;
+  //HardJoinedEntity: TEntityAbstract;
   i: Integer;
   PropName: string;
   QueryKeeper: IQueryKeeper;
@@ -1711,6 +1724,11 @@ begin
   Result := T;
 end;
 
+constructor TEntityListAbstract<T>.CreateInBuilder;
+begin
+  Create(True{aOwnsObjects});
+end;
+
 { TEntityListBase<T> }
 
 constructor TEntityListBase<T>.Create(aDBEngine: TDBEngine; const aOrderBy: POrder);
@@ -1896,38 +1914,8 @@ begin
     FBuilder.FillParams(QueryKeeper.Query);
 
     FDBEngine.OpenQuery(QueryKeeper.Query);
-    HardJoinEngine.RecursiveCreateEntityList(Self, GetEntityClass, QueryKeeper, FDBEngine);
-
-
-    {Instances := THardJoinTool.GetInstances(QueryKeeper, GetEntityClass.GetPrimaryKey, 'T');
-    for Instance in Instances do
-    begin
-      Entity := GetEntityClass.CreateByInstance(FDBEngine, Instance);
-      Add(Entity);
-    end;
-
-    THardJoinTool.ForEachJoinedEntity(GetEntityClass,
-      procedure(var aHardJoinedPropData: THardJoinedPropData)
-      var
-        EntityList: TObject;
-        Instance: TInstance;
-      begin
-        //if Assigned(aHardJoinedPropData.EntityListClass) then
-        //  EntityList := aHardJoinedPropData.EntityListClass.Create;
-
-        Instances := THardJoinTool.GetInstances(
-          QueryKeeper,
-          aHardJoinedPropData.EntityClass.GetPrimaryKey,
-          aHardJoinedPropData.Alias
-        );
-
-        for Instance in Instances do
-        begin
-          Entity := aHardJoinedPropData.EntityClass.CreateByInstance(FDBEngine, Instance);
-          aHardJoinedPropData.InstanceProperty.SetValue(aHardJoinedPropData.Owner, Entity);
-        end;
-      end
-    );}
+    Instances := HardJoinEngine.EncodeInstancesFromQuery(QueryKeeper);
+    HardJoinEngine.DecodeInstancesToEntities(FDBEngine, Self, Instances);
 
     if Assigned(FBuilder) and (FBuilder.Limit > 0) then
       FCanLoadMore := QueryKeeper.Query.RecordCount = FBuilder.Limit;
@@ -2193,7 +2181,7 @@ function TEntitySelectBuilder.BuildSQL: string;
       if not FAgrFields.Contains(Prop) then
       begin
         FieldName := TORMTools.GetFieldNameByPropName(Prop);
-        FieldNameWithAlias := Format('%s$%s', [aAlias, FieldName]);
+        FieldNameWithAlias := THardJoinEngine.GetFieldNameWithAlias(aAlias, Prop);
 
         FQueryBuilder.AddSelect(aAlias, FieldName, FieldNameWithAlias);
 
@@ -2408,58 +2396,37 @@ procedure THardJoinedPropData.Init;
 begin
   Alias := '';
   EntityClass := nil;
-  EntityListClass := nil;
   Index := 0;
-  InstanceProperty := nil;
-  Owner := nil;
   OwnerAlias := '';
-end;
-
-{THardJoinTool}
-
-class function THardJoinTool.GetInstances(aQueryKeeper: IQueryKeeper;
-  const aPrimaryKey: TPrimaryKey; const aAlias: string): TArray<TInstance>;
-
-  function GetKeyValueHash: string;
-  var
-    FieldName: string;
-    KeyField: TKeyField;
-  begin
-    Result := '';
-
-    for KeyField in aPrimaryKey do
-    begin
-      FieldName := Format('%s$%s', [aAlias, TORMTools.GetFieldNameByPropName(KeyField.PropName)]);
-      Result := Result + aQueryKeeper.Query.FieldByName(FieldName).AsString;
-    end;
-
-    Result := TStringTools.GetHash16(Result);
-  end;
-
-var
-  Instance: TInstance;
-  KeyValueHash: string;
-  KeyValueHashes: TArray<string>;
-begin
-  Result := [];
-  KeyValueHashes := [];
-
-  aQueryKeeper.Query.First;
-  while not aQueryKeeper.Query.EOF do
-  begin
-    KeyValueHash := GetKeyValueHash;
-    if not KeyValueHashes.Contains(KeyValueHash) then
-    begin
-      Instance := TInstance.Create(aQueryKeeper, aAlias);
-      Result := Result + [Instance];
-      KeyValueHashes := KeyValueHashes + [KeyValueHash];
-    end;
-
-    aQueryKeeper.Query.Next;
-  end;
+  OwnerClass := nil;
+  OwnerEntityClass := nil;
+  OwnerPropName := '';
 end;
 
 { THardJoinEngine }
+
+function THardJoinEngine.IsEntityClass(aClass: TClass; out aEntityClass: TEntityClass): Boolean;
+begin
+  Result := aClass.InheritsFrom(TEntityAbstract);
+  if Result then
+    aEntityClass := TEntityClass(aClass);
+end;
+
+function THardJoinEngine.IsEntityListClass(aClass: TClass; out aEntityClass: TEntityClass): Boolean;
+var
+  GetEntityClassMethod: TRttiMethod;
+begin
+  GetEntityClassMethod := gRttiContext.GetType(aClass).GetMethod('GetEntityClass');
+  Result := Assigned(GetEntityClassMethod);
+
+  if Result then
+    aEntityClass := GetEntityClassMethod.Invoke(aClass, []).AsType<TEntityClass>;
+end;
+
+class function THardJoinEngine.GetFieldNameWithAlias(const aAlias, aPropName: string): string;
+begin
+  Result := Format('%s$%s', [aAlias, TORMTools.GetFieldNameByPropName(aPropName)]);
+end;
 
 function THardJoinEngine.GetAlias(const aIndex: Integer): string;
 begin
@@ -2467,6 +2434,23 @@ begin
     Result := 'T'
   else
     Result := Format('T%d', [aIndex]);
+end;
+
+function THardJoinEngine.GetHash(aQuery: TFDQuery; const aPrimaryKey: TPrimaryKey;
+  const aAlias: string): string;
+var
+  FieldNameWithAlias: string;
+  KeyField: TKeyField;
+begin
+  Result := aAlias;
+
+  for KeyField in aPrimaryKey do
+  begin
+    FieldNameWithAlias := GetFieldNameWithAlias(aAlias, KeyField.PropName);
+    Result := Result + aQuery.FieldByName(FieldNameWithAlias).AsString;
+  end;
+
+  Result := TStringTools.GetHash16(Result);
 end;
 
 procedure THardJoinEngine.ForEachJoinedEntity(aEntityClass: TEntityClass;
@@ -2489,24 +2473,6 @@ procedure THardJoinEngine.ForEachJoinedEntity(aEntityClass: TEntityClass;
     for FKey in FKeys do
       if FKey.ReferEntityClass = aEntityClass then
         Exit(True);
-  end;
-
-  function IsEntityClass(aClass: TClass; out aEntityClass: TEntityClass): Boolean;
-  begin
-    Result := aClass.InheritsFrom(TEntityAbstract);
-    if Result then
-      aEntityClass := TEntityClass(aClass);
-  end;
-
-  function IsEntityListClass(aClass: TClass; out aEntityClass: TEntityClass): Boolean;
-  var
-    GetEntityClassMethod: TRttiMethod;
-  begin
-    GetEntityClassMethod := gRttiContext.GetType(aClass).GetMethod('GetEntityClass');
-    Result := Assigned(GetEntityClassMethod);
-
-    if Result then
-      aEntityClass := GetEntityClassMethod.Invoke(aClass, []).AsType<TEntityClass>;
   end;
 
   function GetterIsField(aRttiProperty: TRttiInstanceProperty): Boolean;
@@ -2540,7 +2506,7 @@ procedure THardJoinEngine.ForEachJoinedEntity(aEntityClass: TEntityClass;
         then
         begin
           Matched := True;
-          HardJoinedPropData.EntityClass := PropEntityClass;
+          HardJoinedPropData.OwnerClass := aEntityClass;
         end
         else
         if IsEntityListClass(RttiProperty.PropertyType.AsInstance.MetaclassType, {out}PropEntityClass) and
@@ -2548,13 +2514,15 @@ procedure THardJoinEngine.ForEachJoinedEntity(aEntityClass: TEntityClass;
         then
         begin
           Matched := True;
-          HardJoinedPropData.EntityClass := PropEntityClass;
-          HardJoinedPropData.EntityListClass := RttiProperty.PropertyType.AsInstance.MetaclassType;
+          HardJoinedPropData.OwnerClass := RttiProperty.PropertyType.AsInstance.MetaclassType;
         end;
 
         if Matched then
         begin
-          HardJoinedPropData.InstanceProperty := RttiProperty as TRttiInstanceProperty;
+          HardJoinedPropData.EntityClass := PropEntityClass;
+          HardJoinedPropData.OwnerEntityClass := aEntityClass;
+          HardJoinedPropData.OwnerPropName := RttiProperty.Name;
+
           Result := Result + [HardJoinedPropData];
         end;
       end;
@@ -2574,6 +2542,7 @@ begin
     HardJoinedPropDataArr[i].Index := aIndex;
     HardJoinedPropDataArr[i].Alias := GetAlias(aIndex);
     HardJoinedPropDataArr[i].OwnerAlias := aOwnerAlias;
+    FHardJoinedPropData := FHardJoinedPropData + HardJoinedPropDataArr;
 
     aForEachHardJoindEntity({var}HardJoinedPropDataArr[i]);
 
@@ -2584,8 +2553,6 @@ begin
       HardJoinedPropDataArr[i].Alias
     );
   end;
-
-  FHardJoinedPropData := FHardJoinedPropData + HardJoinedPropDataArr;
 end;
 
 procedure THardJoinEngine.RecursiveBuildJoin(aRootEntityClass: TEntityClass;
@@ -2615,33 +2582,119 @@ begin
   );
 end;
 
-procedure THardJoinEngine.RecursiveCreateEntityList(aEntityList: TObject;
-  aEntityClass: TEntityClass; aQueryKeeper: IQueryKeeper; aDBEngine: TDBEngine);
+function THardJoinEngine.EncodeInstancesFromQuery(aQueryKeeper: IQueryKeeper): TArray<TInstance>;
 var
-  Entity: TEntityAbstract;
-  i: Integer;
-  Instance: TInstance;
-  Instances: TArray<TInstance>;
+  HardJoinedPropData: THardJoinedPropData;
   Hash: string;
+  Instance: TInstance;
 begin
+  Result := [];
+
   aQueryKeeper.Query.First;
   while not aQueryKeeper.Query.EOF do
   begin
-    for i := 0 to Length(FHardJoinedPropData) - 1 do
+    for HardJoinedPropData in FHardJoinedPropData do
     begin
-      Hash := GetHash(aQueryKeeper.Query, FHardJoinedPropData[i].EntityClass.GetPrimaryKey, FHardJoinedPropData[i].Alias);
+      Hash := GetHash(aQueryKeeper.Query, HardJoinedPropData.EntityClass.GetPrimaryKey, HardJoinedPropData.Alias);
 
-      if not Instances.ContainHash(Hash) then
+      if not Result.ContainHash(Hash) then
       begin
-        Instance := TInstance.Create(aQueryKeeper, FHardJoinedPropData[i].Alias);
+        Instance := TInstance.Create(aQueryKeeper, HardJoinedPropData.Alias);
         Instance.Hash := Hash;
+        Instance.EntClassName := HardJoinedPropData.EntityClass.QualifiedClassName;
+        if Assigned(HardJoinedPropData.OwnerClass) then
+        begin
+          Instance.OwnerClassName := HardJoinedPropData.OwnerClass.QualifiedClassName;
+          Instance.OwnerEntClassName := HardJoinedPropData.OwnerEntityClass.QualifiedClassName;
+        end;
+        Instance.OwnerPropName := HardJoinedPropData.OwnerPropName;
 
-        Instances := Instances + [Instance];
+        Result := Result + [Instance];
       end;
     end;
 
     aQueryKeeper.Query.Next;
   end;
+end;
+
+procedure THardJoinEngine.DecodeInstancesToEntities(aDBEngine: TDBEngine; aRootOwner: TObject; const aInstances: TArray<TInstance>);
+var
+  EntityClass: TEntityClass;
+  Owners: TArray<TObject>;
+
+  function GetClassByName(const aQualifiedName: string): TClass;
+  begin
+    Result := gRttiContext.FindType(aQualifiedName).AsInstance.MetaclassType;
+  end;
+
+  function GetOwner(const aOwnerClassName, aOwnerEntClassName, aOwnerPropName: string): TObject;
+  var
+    i: Integer;
+    Owner: TObject;
+    OwnerClass: TClass;
+  begin
+    Result := nil;
+
+    if aOwnerClassName.IsEmpty then
+      Exit(aRootOwner);
+
+    for i := Length(Owners) - 1 downto 0 do
+    begin
+      if Owners[i].QualifiedClassName = aOwnerClassName then
+        Exit(Owners[i]);
+    end;
+
+    OwnerClass := GetClassByName(aOwnerClassName);
+    if IsEntityListClass(OwnerClass, {out}EntityClass) then
+    begin
+      Result := gRttiContext.GetType(OwnerClass).GetMethod('CreateInBuilder').Invoke(OwnerClass, []).AsObject;
+
+      Owner := GetOwner(aOwnerEntClassName, aOwnerEntClassName, '');
+      gRttiContext.GetType(Owner.ClassInfo).AsInstance.GetProperty(aOwnerPropName).SetValue(Owner, Result);
+
+      Owners := Owners + [Result];
+    end;
+  end;
+
+var
+  Entity: TEntityAbstract;
+  Instance: TInstance;
+  Owner: TObject;
+begin
+  Owners := [];
+
+  for Instance in aInstances do
+  begin
+    EntityClass := TEntityClass(GetClassByName(Instance.EntClassName));
+    Entity := EntityClass.CreateByInstance(aDBEngine, Instance);
+
+    Owner := GetOwner(Instance.OwnerClassName, Instance.OwnerEntClassName, Instance.OwnerPropName);
+
+    if IsEntityClass(Owner.ClassType, {out}EntityClass) then
+    begin
+      gRttiContext.GetType(Owner.ClassInfo).AsInstance.GetProperty(Instance.OwnerPropName).SetValue(Owner, Entity);
+      Owners := Owners + [Entity];
+    end
+    else
+    if IsEntityListClass(Owner.ClassType, {out}EntityClass) then
+    begin
+      gRttiContext.GetType(Owner.ClassInfo).GetMethod('Add').Invoke(Owner, [Entity]);
+      Owners := Owners + [Entity];
+    end;
+  end;
+end;
+
+{TInstancesHelper}
+
+function TInstancesHelper.ContainHash(const aHash: string): Boolean;
+var
+  Instance: TInstance;
+begin
+  Result := False;
+
+  for Instance in Self do
+    if Instance.Hash = aHash then
+      Exit(True);
 end;
 
 end.
