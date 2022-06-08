@@ -59,6 +59,11 @@ type
     constructor Create(aEntityClass: TEntityClass);
   end;
 
+  EORMMoreThenOneInstanceFound = class(Exception)
+  public
+    constructor Create;
+  end;
+
 implementation
 
 { EORMPropNotExists }
@@ -149,6 +154,13 @@ end;
 constructor EORMTableNameNotDefined.Create(const aClassName: string);
 begin
   inherited CreateFmt('Class %s: table name is not defined in the GetStructure function', [aClassName]);
+end;
+
+{ EORMMoreThenOneInstanceFound }
+
+constructor EORMMoreThenOneInstanceFound.Create;
+begin
+  inherited Create('More then one Intance found for Entity');
 end;
 
 end.

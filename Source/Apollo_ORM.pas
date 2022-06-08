@@ -1278,14 +1278,20 @@ begin
     FDBEngine.OpenQuery(dsQuery);
 
     if dsQuery.IsEmpty then
-      FIsNew := True;
-
-    InstanceList := FBuilder.EncodeInstancesFromQuery(QueryKeeper);
-    if InstanceList.Count = 1 then
     begin
-      FInstance := InstanceList.List[0];
-      FInstance.SetEntity(Self);
+      FIsNew := True;
+      FInstance := TInstance.Create(QueryKeeper, 'T');
+    end
+    else
+    begin
+      InstanceList := FBuilder.EncodeInstancesFromQuery(QueryKeeper);
+      if InstanceList.Count = 1 then
+        FInstance := InstanceList.List[0]
+      else
+        raise EORMMoreThenOneInstanceFound.Create;
     end;
+
+    FInstance.SetEntity(Self);
   finally
     gRttiContext.Free;
   end;
