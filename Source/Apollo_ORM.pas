@@ -65,15 +65,13 @@ type
     procedure Init;
   end;
 
-  TForEachInstanceFieldProc = reference to procedure(const aInstanceField: TInstanceField;
-    const aPropName: string; const aPropValue: Variant);
-
   TInstanceList = record
     Alias: string;
     EntityClassName: string;
     EntityListClassName: string;
     List: TArray<TInstance>;
     PropName: string;
+    function Count: Integer;
     function FindByHash(const aHash: string): TInstance;
     function NeedToMount: Boolean;
     procedure Init;
@@ -99,6 +97,10 @@ type
     function Count: Integer;
     function FieldByName(const aFieldName: string): PInstanceField;
     procedure SetQueryKeeper(aQueryKeeper: IQueryKeeper);
+  public
+    type
+      TForEachInstanceFieldProc = reference to procedure(const aInstanceField: TInstanceField;
+        const aPropName: string; const aPropValue: Variant);
   public
     function GetFieldByName(const aFieldName: string): TInstanceField;
     procedure ForEachField(const aModifiedOnly: Boolean; aCallbackProc: TForEachInstanceFieldProc);
@@ -135,13 +137,47 @@ type
     property Stream: TStream read GetStream write SetStream;
   end;
 
-  TForEachBlobProp = reference to procedure(aBlob: TORMBlob);
-  TCreateListFunc<T> = reference to function: T;
+  IEntitySelectBuilder = interface
+  ['{1E55579C-26C1-47AD-974E-1051B249D148}']
+    function AddAndWhere(const aAlias, aPropName: string; const aEquality: TEquality;
+      const aParamName: string): IEntitySelectBuilder;
+    function AddCount(const aAlias, aPropName, aAsFieldName: string): IEntitySelectBuilder;
+    function AddOrderBy(const aOrderItem: TOrderItem): IEntitySelectBuilder;
+    function AddOrWhere(const aAlias, aPropName: string; const aEquality: TEquality;
+      const aParamName: string): IEntitySelectBuilder;
+    function BuildSQL: string;
+    function JoinEntity(aEntityClass: TEntityClass; const aAlias: string;
+      const aOwnerAlias: string = ''): IEntitySelectBuilder;
+    function SetLimit(const aValue: Integer): IEntitySelectBuilder;
+    function SetOffset(const aValue: Integer): IEntitySelectBuilder;
+    function SetParam(const aParamName: string; const aValue: Variant): IEntitySelectBuilder;
+  end;
+
+  IEntitySelectBuilderImpl = interface(IEntitySelectBuilder)
+  ['{CDE70C4D-A542-4858-A4E0-53FBB3DF8E3F}']
+    function EncodeInstancesFromQuery(aQueryKeeper: IQueryKeeper): TInstanceList;
+    function GetLimit: Integer;
+    function GetOffset: Integer;
+    procedure DecodeInstanceList(aDBEngine: TDBEngine; aOwnerEntity: TEntityAbstract;
+      aEntityList: TObject; const aInstanceList: TInstanceList);
+    procedure DecodeInstanceProps(aDBEngine: TDBEngine; aOwnerEntity: TEntityAbstract;
+      const aInstanceProps: TArray<TInstanceProp>);
+    procedure FillParams(aQuery: TFDQuery);
+    procedure RecursiveJoinTables(aEntityClass: TEntityClass);
+    procedure SetOrderBy(const aOrderBy: POrder);
+    property Limit: Integer read GetLimit;
+    property Offset: Integer read GetOffset;
+  end;
 
 {$M+}
   TEntityAbstract = class abstract(TIntefacedObjectNotUsingReference, ISourceFreeNotification)
   private
+    type
+      TForEachBlobProp = reference to procedure(aBlob: TORMBlob);
+  private
+    FBuilder: IEntitySelectBuilderImpl;
     FDBEngine: TDBEngine;
+    FEagerLoadingMode: Boolean;
     FFreeListProcs: TSimpleMethods;
     FFreeNotifications: TNotifyEvents;
     FIsNew: Boolean;
@@ -183,6 +219,9 @@ type
     procedure SetProp(const aPropName: string; aValue: Variant);
     procedure StoreJoinedChildEntities;
     procedure StoreJoinedParentEntities;
+  protected
+    type
+      TCreateListFunc<T> = reference to function: T;
   protected
     FInstance: TInstance;
     function GetJoinedEntity<T: TEntityAbstract>(const aFKPropName: string; var aCurrentValue: T): T;
@@ -262,6 +301,9 @@ type
     property Value: Variant read FValue;
   end;
 
+  EagerLoading = class(TCustomAttribute)
+  end;
+
 {$M+}
   [SkipStructure]
   TEntityFeatID = class abstract(TEntityAbstract)
@@ -304,38 +346,6 @@ type
     constructor Create(aOwnsObjects: Boolean = True); reintroduce;
   end;
 
-  IEntitySelectBuilder = interface
-  ['{1E55579C-26C1-47AD-974E-1051B249D148}']
-    function AddAndWhere(const aAlias, aPropName: string; const aEquality: TEquality;
-      const aParamName: string): IEntitySelectBuilder;
-    function AddCount(const aAlias, aPropName, aAsFieldName: string): IEntitySelectBuilder;
-    function AddOrderBy(const aOrderItem: TOrderItem): IEntitySelectBuilder;
-    function AddOrWhere(const aAlias, aPropName: string; const aEquality: TEquality;
-      const aParamName: string): IEntitySelectBuilder;
-    function BuildSQL: string;
-    function JoinEntity(aEntityClass: TEntityClass; const aAlias: string;
-      const aOwnerAlias: string = ''): IEntitySelectBuilder;
-    function SetLimit(const aValue: Integer): IEntitySelectBuilder;
-    function SetOffset(const aValue: Integer): IEntitySelectBuilder;
-    function SetParam(const aParamName: string; const aValue: Variant): IEntitySelectBuilder;
-  end;
-
-  IEntitySelectBuilderImpl = interface(IEntitySelectBuilder)
-  ['{CDE70C4D-A542-4858-A4E0-53FBB3DF8E3F}']
-    function EncodeInstancesFromQuery(aQueryKeeper: IQueryKeeper): TInstanceList;
-    function GetLimit: Integer;
-    function GetOffset: Integer;
-    procedure DecodeInstanceList(aDBEngine: TDBEngine; aOwnerEntity: TEntityAbstract;
-      aEntityList: TObject; const aInstances: TInstanceList);
-    procedure DecodeInstanceProps(aDBEngine: TDBEngine; aOwnerEntity: TEntityAbstract;
-      const aInstanceProps: TArray<TInstanceProp>);
-    procedure FillParams(aQuery: TFDQuery);
-    procedure RecursiveJoinTables(aEntityClass: TEntityClass);
-    procedure SetOrderBy(const aOrderBy: POrder);
-    property Limit: Integer read GetLimit;
-    property Offset: Integer read GetOffset;
-  end;
-
   TEntityListBase<T: TEntityAbstract> = class(TEntityListAbstract<T>)
   private
     type
@@ -343,6 +353,7 @@ type
   private
     FBuilder: IEntitySelectBuilderImpl;
     FDBEngine: TDBEngine;
+    FEagerLoadingMode: Boolean;
     FFKey: TFKey;
     FOffset: Integer;
     FOwnerEntity: TEntityAbstract;
@@ -374,7 +385,6 @@ type
     constructor Create(aOwnerEntity: TEntityAbstract;
       const aOrderBy: POrder = nil); overload;
     constructor Create(aDBEngine: TDBEngine; const aBuilder: IEntitySelectBuilder); overload;
-    constructor CreateInBuilder(aOwnerEntity: TEntityAbstract);
     destructor Destroy; override;
   end;
 
@@ -416,7 +426,7 @@ type
     FQueryBuilder: IQueryBuilder;
     function GetAlias(const aIndex: Integer): string;
     function GetClassByName(const aQualifiedName: string): TClass;
-    function GetHardJoinedEntItems(aEntityClass: TEntityClass): TArray<TJoinEntItem>;
+    function GetEagerLoadingItems(aEntityClass: TEntityClass): TArray<TJoinEntItem>;
     function GetHash(aQuery: TFDQuery; const aPrimaryKey: TPrimaryKey; const aAlias: string): string;
     function HasReference(aEntityClass, aReferEntityClass: TEntityClass; out aFKey: TFKey): Boolean;
     function IsEntityClass(aClass: TClass; out aEntityClass: TEntityClass): Boolean;
@@ -440,7 +450,7 @@ type
     function SetParam(const aParamName: string; const aValue: Variant): IEntitySelectBuilder;
     procedure DecodeInstanceList(aDBEngine: TDBEngine;
       aOwnerEntity: TEntityAbstract; aEntityList: TObject;
-      const aInstances: TInstanceList);
+      const aInstanceList: TInstanceList);
     procedure DecodeInstanceProps(aDBEngine: TDBEngine; aOwnerEntity: TEntityAbstract;
       const aInstanceProps: TArray<TInstanceProp>);
     procedure FillParams(aQuery: TFDQuery);
@@ -592,6 +602,7 @@ end;
 procedure TEntityAbstract.AssignPropsFromInstance(aInstance: TInstance);
 var
   InstanceField: TInstanceField;
+  InstanceList: TInstanceList;
   PropName: string;
 begin
   for InstanceField in aInstance.Fields do
@@ -604,6 +615,14 @@ begin
       Continue;
 
     Prop[PropName] := InstanceField.Value;
+  end;
+
+  if Assigned(FBuilder) then
+  begin
+    for InstanceList in aInstance.FInstanceLists do
+      FBuilder.DecodeInstanceList(FDBEngine, Self, nil{aEntityList}, InstanceList);
+
+    FBuilder.DecodeInstanceProps(FDBEngine, Self, aInstance.FInstanceProps);
   end;
 end;
 
@@ -1218,9 +1237,9 @@ end;
 
 procedure TEntityAbstract.ReadInstance(const aPKeyValues: TArray<Variant>);
 var
-  Builder: IEntitySelectBuilderImpl;
   dsQuery: TFDQuery;
   i: Integer;
+  InstanceList: TInstanceList;
   KeyField: TKeyField;
   PropName: string;
   QueryKeeper: IQueryKeeper;
@@ -1233,13 +1252,13 @@ begin
       SQL := GetSelectNoRowsSQL
     else
     begin
-      Builder := MakeEntitySelectBuilder('T') as IEntitySelectBuilderImpl;
-      Builder.RecursiveJoinTables(GetClassType);
+      FBuilder := MakeEntitySelectBuilder('T') as IEntitySelectBuilderImpl;
+      FBuilder.RecursiveJoinTables(GetClassType);
 
       for KeyField in GetPrimaryKey do
-        Builder.AddAndWhere('T', KeyField.PropName, eEquals, 'OLD_' + KeyField.PropName);
+        FBuilder.AddAndWhere('T', KeyField.PropName, eEquals, 'OLD_' + KeyField.PropName);
 
-      SQL := Builder.BuildSQL;
+      SQL := FBuilder.BuildSQL;
     end;
 
     dsQuery := TFDQuery.Create(nil);
@@ -1261,19 +1280,12 @@ begin
     if dsQuery.IsEmpty then
       FIsNew := True;
 
-    FInstance := TInstance.Create(QueryKeeper, 'T');
-    FInstance.SetEntity(Self);
-
-    {THardJoinTool.ForEachJoinedEntity(GetClassType,
-      procedure(var aHardJoinedPropData: THardJoinedPropData)
-      var
-        Alias: string;
-      begin
-        Alias := Aliases[aHardJoinedPropData.Index];
-        HardJoinedEntity := CreateHardJoinedEntity(QueryKeeper, Alias, aHardJoinedPropData.EntityClass);
-        aHardJoinedPropData.InstanceProperty.SetValue(Self, HardJoinedEntity);
-      end
-    );}
+    InstanceList := FBuilder.EncodeInstancesFromQuery(QueryKeeper);
+    if InstanceList.Count = 1 then
+    begin
+      FInstance := InstanceList.List[0];
+      FInstance.SetEntity(Self);
+    end;
   finally
     gRttiContext.Free;
   end;
@@ -1703,12 +1715,6 @@ end;
 
 { TEntityListBase<T> }
 
-constructor TEntityListBase<T>.CreateInBuilder(aOwnerEntity: TEntityAbstract);
-begin
-  Create(True{aOwnsObjects});
-  DoCreateRefList(aOwnerEntity, nil{aForEachFKeyProc});
-end;
-
 constructor TEntityListBase<T>.Create(aDBEngine: TDBEngine; const aOrderBy: POrder);
 begin
   inherited Create(True);
@@ -1759,7 +1765,8 @@ begin
   FBuilder := IEntitySelectBuilderImpl(aBuilder);
   FOffset := FBuilder.Offset;
 
-  LoadList;
+  if not FEagerLoadingMode then
+    LoadList;
 
   AfterCreate;
 end;
@@ -1829,32 +1836,29 @@ var
   FKey: TFKey;
   FKeys: TFKeys;
 begin
-  if Assigned(aForEachFKeyProc) then
-  begin
-    Result := False;
-    FKeys := GetEntityClass.GetStructure.FKeys;
+  Result := False;
+  FKeys := GetEntityClass.GetStructure.FKeys;
 
-    for FKey in FKeys do
-      if FKey.ReferEntityClass = aOwnerEntity.ClassType then
-      begin
-        FFKey := FKey;
-        FieldName := TORMTools.GetFieldNameByPropName(FKey.PropName);
+  for FKey in FKeys do
+    if FKey.ReferEntityClass = aOwnerEntity.ClassType then
+    begin
+      FFKey := FKey;
+      FieldName := TORMTools.GetFieldNameByPropName(FKey.PropName);
 
-        aForEachFKeyProc(FieldName, FKey);
-        Result := True;
+      aForEachFKeyProc(FieldName, FKey);
+      Result := True;
 
-        Break;
-      end;
-  end
-  else
-    Result := True;
+      Break;
+    end;
 
   if Result then
   begin
     FOwnerEntity := aOwnerEntity;
-    aOwnerEntity.FFreeListProcs.Add(Free);
-    aOwnerEntity.FStoreListProcs.Add(Store);
-    aOwnerEntity.FRevertListProcs.Add(Revert);
+    FEagerLoadingMode := aOwnerEntity.FEagerLoadingMode;
+
+    FOwnerEntity.FFreeListProcs.Add(Free);
+    FOwnerEntity.FStoreListProcs.Add(Store);
+    FOwnerEntity.FRevertListProcs.Add(Revert);
   end;
 end;
 
@@ -1900,6 +1904,9 @@ begin
       FCanLoadMore := QueryKeeper.Query.RecordCount = FBuilder.Limit;
   finally
     gRttiContext.Free;
+
+    if FEagerLoadingMode then
+      FEagerLoadingMode := False;
   end;
 end;
 
@@ -2062,36 +2069,30 @@ begin
 end;
 
 procedure TEntitySelectBuilder.DecodeInstanceList(aDBEngine: TDBEngine;
-  aOwnerEntity: TEntityAbstract; aEntityList: TObject; const aInstances: TInstanceList);
+  aOwnerEntity: TEntityAbstract; aEntityList: TObject; const aInstanceList: TInstanceList);
 var
   Entity: TEntityAbstract;
   EntityClass: TEntityClass;
-  EntityListClass: TClass;
   Instance: TInstance;
   Instances: TInstanceList;
 begin
-  if not aInstances.NeedToMount then
+  if not aInstanceList.NeedToMount then
     Exit;
 
   if not Assigned(aEntityList) then
   begin
-    EntityListClass := GetClassByName(aInstances.EntityListClassName);
+    aOwnerEntity.FEagerLoadingMode := True;
 
     aEntityList := gRttiContext
-      .GetType(EntityListClass)
-      .GetMethod('CreateInBuilder')
-      .Invoke(EntityListClass, [aOwnerEntity])
-      .AsObject;
-
-    gRttiContext
       .GetType(aOwnerEntity.ClassInfo)
-      .AsInstance.GetProperty(aInstances.PropName)
-      .SetValue(aOwnerEntity, aEntityList);
+      .AsInstance.GetProperty(aInstanceList.PropName)
+      .GetValue(aOwnerEntity)
+      .AsObject;
   end;
 
-  for Instance in aInstances.List do
+  for Instance in aInstanceList.List do
   begin
-    EntityClass := TEntityClass(GetClassByName(aInstances.EntityClassName));
+    EntityClass := TEntityClass(GetClassByName(aInstanceList.EntityClassName));
     Entity := EntityClass.CreateByInstance(aDBEngine, Instance);
 
     for Instances in Instance.FInstanceLists do
@@ -2133,8 +2134,6 @@ begin
       .SetValue(aOwnerEntity, Entity);
 
     Entity.FOwner := aOwnerEntity;
-    aOwnerEntity.FJoinedEntities.Add(Entity);
-    aOwnerEntity.FRevertListProcs.Add(Entity.Revert);
   end;
 end;
 
@@ -2294,14 +2293,17 @@ begin
     end;
 end;
 
-function TEntitySelectBuilder.GetHardJoinedEntItems(aEntityClass: TEntityClass): TArray<TJoinEntItem>;
+function TEntitySelectBuilder.GetEagerLoadingItems(aEntityClass: TEntityClass): TArray<TJoinEntItem>;
 
-  function GetterIsField(aRttiProperty: TRttiInstanceProperty): Boolean;
+  function HasEagerLoadingAttribute(aRttiProperty: TRttiProperty): Boolean;
   var
-    aGetter: Pointer;
+    Attribute: TCustomAttribute;
   begin
-    aGetter := aRttiProperty.PropInfo^.GetProc;
-    Result := (IntPtr(aGetter) and PROPSLOT_MASK) = PROPSLOT_FIELD;
+    Result := False;
+
+    for Attribute in aRttiProperty.GetAttributes do
+      if Attribute is EagerLoading then
+        Exit(True);
   end;
 
 var
@@ -2317,7 +2319,7 @@ begin
   RttiProperties := gRttiContext.GetType(aEntityClass.ClassInfo).GetDeclaredProperties;
   for RttiProperty in RttiProperties do
   begin
-    if RttiProperty.PropertyType.IsInstance and GetterIsField(RttiProperty as TRttiInstanceProperty) then
+    if RttiProperty.PropertyType.IsInstance and HasEagerLoadingAttribute(RttiProperty) then
     begin
       Matched := False;
       JoinEntItem.Init;
@@ -2352,22 +2354,22 @@ end;
 procedure TEntitySelectBuilder.DoRecursiveJoinTables(aEntityClass: TEntityClass;
   var aIndex: Integer; const aOwnerAlias: string);
 var
-  HardJoinedEntItems: TArray<TJoinEntItem>;
+  EagerLoadingItems: TArray<TJoinEntItem>;
   i: Integer;
 begin
-  HardJoinedEntItems := GetHardJoinedEntItems(aEntityClass);
+  EagerLoadingItems := GetEagerLoadingItems(aEntityClass);
 
-  for i := 0 to Length(HardJoinedEntItems) - 1 do
+  for i := 0 to Length(EagerLoadingItems) - 1 do
   begin
     Inc(aIndex);
 
-    HardJoinedEntItems[i].Index := aIndex;
-    HardJoinedEntItems[i].Alias := GetAlias(aIndex);
-    HardJoinedEntItems[i].OwnerAlias := aOwnerAlias;
+    EagerLoadingItems[i].Index := aIndex;
+    EagerLoadingItems[i].Alias := GetAlias(aIndex);
+    EagerLoadingItems[i].OwnerAlias := aOwnerAlias;
 
-    FJoinEntItems := FJoinEntItems + HardJoinedEntItems;
+    FJoinEntItems := FJoinEntItems + EagerLoadingItems;
 
-    DoRecursiveJoinTables(HardJoinedEntItems[i].EntityClass, aIndex, HardJoinedEntItems[i].Alias);
+    DoRecursiveJoinTables(EagerLoadingItems[i].EntityClass, aIndex, EagerLoadingItems[i].Alias);
   end;
 end;
 
@@ -2696,6 +2698,11 @@ begin
   List := [];
   Alias := '';
   PropName := '';
+end;
+
+function TInstanceList.Count: Integer;
+begin
+  Result := Length(List);
 end;
 
 function TInstanceList.FindByHash(const aHash: string): TInstance;
