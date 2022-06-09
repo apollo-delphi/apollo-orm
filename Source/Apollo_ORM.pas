@@ -183,7 +183,7 @@ type
     FIsNew: Boolean;
     FJoinedEntities: TObjectList<TEntityAbstract>;
     FNeedToRefreshContainer: TObjectList;
-    FOwner: TEntityAbstract;
+    FOwner: TObject;
     FRevertListProcs: TSimpleMethods;
     FStoreListProcs: TSimpleMethods;
     function CreateJoinedEntity(aEntityClass: TEntityClass; const aKeyPropName,
@@ -257,7 +257,7 @@ type
     constructor CreateByKeeper(const aDBEngine: TDBEngine; const aPKeyValues: TArray<Variant>);
     destructor Destroy; override;
     property IsNew: Boolean read FIsNew;
-    property Owner: TEntityAbstract read FOwner write FOwner;
+    property Owner: TObject read FOwner write FOwner;
     property Prop[const aPropName: string]: Variant read GetProp write SetProp;
   end;
 {$M-}
@@ -1355,6 +1355,9 @@ begin
   begin
     if Assigned(aOldValue) then
       RemoveJoinedEntity(aOldValue);
+
+    if not Assigned(aNewValue.Owner) then
+      aNewValue.Owner := Self;
 
     Result := aNewValue;
     FJoinedEntities.Add(Result);
