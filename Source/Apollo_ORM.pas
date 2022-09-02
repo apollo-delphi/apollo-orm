@@ -381,10 +381,10 @@ type
     procedure Remove(const aIndex: Integer); overload;
     procedure Revert;
     procedure Store;
-    constructor Create(aDBEngine: TDBEngine; const aOrderBy: POrder = nil); overload;
     constructor Create(aOwnerEntity: TEntityAbstract;
       const aOrderBy: POrder = nil); overload;
     constructor Create(aDBEngine: TDBEngine; const aBuilder: IEntitySelectBuilder); overload;
+    constructor CreateAndGetAll(aDBEngine: TDBEngine; const aOrderBy: POrder = nil);
     destructor Destroy; override;
   end;
 
@@ -1724,7 +1724,7 @@ end;
 
 { TEntityListBase<T> }
 
-constructor TEntityListBase<T>.Create(aDBEngine: TDBEngine; const aOrderBy: POrder);
+constructor TEntityListBase<T>.CreateAndGetAll(aDBEngine: TDBEngine; const aOrderBy: POrder);
 begin
   inherited Create(True);
 
