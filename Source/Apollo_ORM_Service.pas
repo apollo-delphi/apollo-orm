@@ -167,6 +167,7 @@ procedure TORMService.CreateORMTablesIfNotExist;
 var
   EntityClass: TEntityClass;
   EntityClasses: TArray<TEntityClass>;
+  i: Integer;
   SQLList: TStringList;
 begin
   EntityClasses := [TORMTable, TORMField, TORMTransfer];
@@ -176,7 +177,8 @@ begin
     begin
       SQLList := FDBEngine.GetCreateTableSQL(GetORMDef(EntityClass));
       try
-        FDBEngine.ExecSQL(SQLList.Text);
+        for i := 0 to SQLList.Count - 1 do
+          FDBEngine.ExecSQL(SQLList.Strings[i]);
       finally
         SQLList.Free;
       end;
@@ -334,7 +336,7 @@ var
 begin
   for Attribute in aRttiProperty.GetAttributes do
     if Attribute is Text then
-      Exit('TEXT');
+      Exit(FDBEngine.GetSQLType('TEXT'));
 
   if (aRttiProperty.PropertyType.IsInstance) and
      (aRttiProperty.PropertyType.AsInstance.MetaclassType = TORMBlob)
@@ -464,10 +466,11 @@ end;
 
 function TORMService.HandleEntityType(aEntityType: TRttiInstanceType): string;
 var
+  i: Integer;
   ORMField: TORMField;
   ORMTable: TORMTable;
-  Structure: TStructure;
   SQLList: TStringList;
+  Structure: TStructure;
   TableDef: TTableDef;
 begin
   Result := '';
@@ -479,42 +482,35 @@ begin
       TableDef := GetTableDef(Structure, ORMTable, aEntityType);
 
       if ORMTable.IsNew then
-      begin
-        SQLList := FDBEngine.GetCreateTableSQL(TableDef);
-        try
-          Result := SQLList.Text;
-        finally
-          SQLList.Free;
-        end;
-      end
+        SQLList := FDBEngine.GetCreateTableSQL(TableDef)
       else
-      begin
         SQLList := FDBEngine.GetModifyTableSQL(TableDef);
-        try
-          if SQLList.Count > 0 then
-            Result := SQLList.Text;
-        finally
-          SQLList.Free;
-        end;
-      end;
 
-      if not Result.IsEmpty then
+      if Assigned(SQLList) then
       begin
-        FDBEngine.ExecSQL(Result);
+        if SQLList.Count > 0 then
+        begin
+          for i := 0 to SQLList.Count - 1 do
+            FDBEngine.ExecSQL(SQLList.Strings[i]);
 
-        ORMTable.TableName := TableDef.TableName;
-        ORMTable.ORMFields.Clear;
+          ORMTable.TableName := TableDef.TableName;
+          ORMTable.ORMFields.Clear;
 
-        HandleEntityFields(aEntityType.GetProperties, procedure(aRttiProperty: TRttiProperty)
-          begin
-            ORMField := TORMField.Create(FDBEngine);
-            ORMField.FieldName := TORMTools.GetFieldNameByPropName(aRttiProperty.Name);
-            ORMField.ORMUniqueID := GetORMUniqueID(aRttiProperty);
-            ORMTable.ORMFields.Add(ORMField);
-          end
-        );
+          HandleEntityFields(aEntityType.GetProperties, procedure(aRttiProperty: TRttiProperty)
+            begin
+              ORMField := TORMField.Create(FDBEngine);
+              ORMField.FieldName := TORMTools.GetFieldNameByPropName(aRttiProperty.Name);
+              ORMField.ORMUniqueID := GetORMUniqueID(aRttiProperty);
+              ORMTable.ORMFields.Add(ORMField);
+            end
+          );
 
-        ORMTable.StoreAll;
+          ORMTable.StoreAll;
+
+          Result := SQLList.Text;
+        end;
+
+        SQLList.Free;
       end;
 
       HandleInitData(TEntityClass(aEntityType.MetaclassType));
@@ -671,15 +667,23 @@ var
 begin
   FDBEngine := aDBEngine;
 
+  FDBEngine.TransactionStart;
+  try
+    CreateORMTablesIfNotExist;
+
+    FDBEngine.TransactionCommit;
+  except
+    FDBEngine.TransactionRollback;
+    raise;
+  end;
+
   FTransferData := TTransferData.Create;
   SQLList := TStringList.Create;
   FDBEngine.DisableForeignKeys;
   try
     FDBEngine.TransactionStart;
     try
-      CreateORMTablesIfNotExist;
       InitCurrentTransferNum;
-
       BeforeMigrate(FTransferData);
 
       EntityTypes := GetTypesInheritFrom(TEntityAbstract);

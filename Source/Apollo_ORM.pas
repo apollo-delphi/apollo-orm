@@ -956,14 +956,28 @@ begin
         FieldsPart := FieldsPart + ', ';
         ValuesPart := ValuesPart + ', ';
       end;
-      FieldsPart := FieldsPart + Format('`%s`', [InstanceField.FieldName]);
+      FieldsPart := FieldsPart + Format('%s%s%s',
+        [
+          FDBEngine.GetNameQuote,
+          InstanceField.FieldName,
+          FDBEngine.GetNameQuote
+        ]
+      );
       ValuesPart := ValuesPart + ':' + PropName;
 
       Inc(i);
     end;
   end;
 
-  Result := Format('INSERT INTO `%s` (%s) VALUES (%s)', [GetTableName, FieldsPart, ValuesPart]);
+  Result := Format('INSERT INTO %s%s%s (%s) VALUES (%s)',
+    [
+      FDBEngine.GetNameQuote,
+      GetTableName,
+      FDBEngine.GetNameQuote,
+      FieldsPart,
+      ValuesPart
+    ]
+  );
 end;
 
 function TEntityAbstract.GetInstanceFieldType(
@@ -1120,7 +1134,9 @@ end;
 
 function TEntityAbstract.GetSelectNoRowsSQL: string;
 begin
-  Result := Format('SELECT * FROM `%s` WHERE 1 = 2', [GetTableName]);
+  Result := Format('SELECT * FROM %s%s%s WHERE 1 = 2',
+    [FDBEngine.GetNameQuote, GetTableName, FDBEngine.GetNameQuote]
+  );
 end;
 
 class function TEntityAbstract.GetTableName: string;
@@ -1144,13 +1160,27 @@ begin
     begin
       if i > 0 then
         SetPart := SetPart + ', ';
-      SetPart := SetPart + Format('`%s` = :%s', [aInstanceField.FieldName, aPropName]);
+      SetPart := SetPart + Format('%s%s%s = :%s',
+        [
+          FDBEngine.GetNameQuote,
+          aInstanceField.FieldName,
+          FDBEngine.GetNameQuote,
+          aPropName]
+        );
       Inc(i);
     end
   );
 
   if i > 0 then
-    Result := Format('UPDATE %s SET %s WHERE %s', [GetTableName, SetPart, GetWherePart]);
+    Result := Format('UPDATE %s%s%s SET %s WHERE %s',
+      [
+        FDBEngine.GetNameQuote,
+        GetTableName,
+        FDBEngine.GetNameQuote,
+        SetPart,
+        GetWherePart
+      ]
+    );
 end;
 
 function TEntityAbstract.GetWherePart: string;
@@ -1630,8 +1660,16 @@ var
   QueryKeeper: IQueryKeeper;
 begin
   QueryKeeper := MakeQueryKeeper;
-  QueryKeeper.Query.SQL.Text := Format('SELECT COUNT(*) FROM `%s` WHERE `%s` = :VALUE AND ID <> :ID',
-    [GetTableName, TORMTools.GetFieldNameByPropName(aPropName)]);
+  QueryKeeper.Query.SQL.Text := Format('SELECT COUNT(*) FROM %s%s%s WHERE %s%s%s = :VALUE AND ID <> :ID',
+    [
+      FDBEngine.GetNameQuote,
+      GetTableName,
+      FDBEngine.GetNameQuote,
+      FDBEngine.GetNameQuote,
+      TORMTools.GetFieldNameByPropName(aPropName),
+      FDBEngine.GetNameQuote
+    ]
+  );
   QueryKeeper.Query.ParamByName('VALUE').Value := aValue;
   QueryKeeper.Query.ParamByName('ID').AsInteger := ID;
 
@@ -1662,10 +1700,11 @@ begin
 end;
 
 procedure TEntityFeatID.ApplyAutoGenFields;
+
 begin
   inherited;
 
-  ID := FDBEngine.GetLastInsertedID;
+  ID := FDBEngine.GetLastInsertedID(GetTableName);
 end;
 
 { TFKeysHelper }
