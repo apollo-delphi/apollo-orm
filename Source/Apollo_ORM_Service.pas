@@ -88,7 +88,6 @@ type
     function GetMaxDataTransferNum(aDBEngine: TDBEngine): Integer;
     function GetORMDef(aEntityClass: TEntityClass): TTableDef;
     function GetORMTable(const aORMUniqueID: string): TORMTable;
-    function GetORMUniqueID(aRttiObject: TRttiObject): string;
     function GetPrimaryKey(aEntityType: TRttiInstanceType): TPrimaryKey;
     function GetSQLFieldType(aRttiProperty: TRttiProperty): string;
     function GetTableDef(const aStructure: TStructure; aORMTable: TORMTable;
@@ -114,6 +113,7 @@ type
     procedure AfterMigrate(aData: TTransferData); virtual;
     procedure BeforeMigrate(aData: TTransferData); virtual;
   public
+    class function GetORMUniqueID(aRttiObject: TRttiObject): string;
     function NeedToMigrate(aDBEngine: TDBEngine): Boolean;
     procedure Migrate(aDBEngine: TDBEngine);
     constructor Create;
@@ -125,6 +125,7 @@ implementation
 uses
   Apollo_Helpers,
   Apollo_ORM_Exception,
+  FireDAC.Comp.Client,
   System.Classes,
   System.Math,
   System.SysUtils,
@@ -302,7 +303,7 @@ begin
   Result := TORMTable.Create(FDBEngine, [aORMUniqueID]);
 end;
 
-function TORMService.GetORMUniqueID(aRttiObject: TRttiObject): string;
+class function TORMService.GetORMUniqueID(aRttiObject: TRttiObject): string;
 var
   CustomAttribute: TCustomAttribute;
 begin
@@ -336,7 +337,7 @@ var
 begin
   for Attribute in aRttiProperty.GetAttributes do
     if Attribute is Text then
-      Exit(FDBEngine.GetSQLType('TEXT'));
+      Exit('TEXT');
 
   if (aRttiProperty.PropertyType.IsInstance) and
      (aRttiProperty.PropertyType.AsInstance.MetaclassType = TORMBlob)
@@ -469,6 +470,7 @@ var
   i: Integer;
   ORMField: TORMField;
   ORMTable: TORMTable;
+  Query: TFDQuery;
   SQLList: TStringList;
   Structure: TStructure;
   TableDef: TTableDef;
@@ -478,6 +480,7 @@ begin
   if TryGetStructure(aEntityType, Structure) then
   begin
     ORMTable := GetORMTable(GetORMUniqueID(aEntityType));
+    Query := TFDQuery.Create(nil);
     try
       TableDef := GetTableDef(Structure, ORMTable, aEntityType);
 
@@ -491,7 +494,10 @@ begin
         if SQLList.Count > 0 then
         begin
           for i := 0 to SQLList.Count - 1 do
-            FDBEngine.ExecSQL(SQLList.Strings[i]);
+          begin
+            Query.SQL.Text := SQLList.Strings[i];
+            FDBEngine.ExecQuery(Query);
+          end;
 
           ORMTable.TableName := TableDef.TableName;
           ORMTable.ORMFields.Clear;
@@ -516,6 +522,7 @@ begin
       HandleInitData(TEntityClass(aEntityType.MetaclassType));
     finally
       ORMTable.Free;
+      Query.Free;
     end;
   end;
 end;
@@ -681,7 +688,7 @@ begin
   SQLList := TStringList.Create;
   FDBEngine.DisableForeignKeys;
   try
-    FDBEngine.TransactionStart;
+    //FDBEngine.TransactionStart;
     try
       InitCurrentTransferNum;
       BeforeMigrate(FTransferData);
@@ -708,7 +715,7 @@ begin
         Exit;
       end;
 
-      FDBEngine.TransactionCommit;
+      //FDBEngine.TransactionCommit;
     except;
       FDBEngine.TransactionRollback;
       raise;

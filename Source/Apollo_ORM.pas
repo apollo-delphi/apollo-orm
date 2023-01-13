@@ -228,6 +228,9 @@ type
     function GetJoinedList<T: class>(var aCurrentList: T; aCreateListFunc: TCreateListFunc<T>): T;
     function SetJoinedEntity<T: TEntityAbstract>(const aFKPropName: string; aOldValue, aNewValue: T): T;
     procedure AfterCreate; virtual;
+    procedure AfterDelete; virtual;
+    procedure AfterInsert; virtual;
+    procedure AfterUpdate; virtual;
     procedure ApplyAutoGenFields; virtual;
     procedure AssignInstanceFromProps;
     procedure AssignPropsFromInstance(aInstance: TInstance);
@@ -323,6 +326,7 @@ type
 
   IEntityKeeper<T: TEntityAbstract> = interface
     function GetOne: T;
+    function Transfer: T;
     property One: T read GetOne;
   end;
 
@@ -335,8 +339,9 @@ type
     procedure EntityFreeNotification(Sender: TObject);
   protected
     function GetOne: T;
+    function Transfer: T;
   public
-    constructor Create(aEntity: T);
+    constructor Create(aEntity: T; const aOwns: Boolean = False);
     destructor Destroy; override;
   end;
 
@@ -541,6 +546,18 @@ end;
 { TEntityAbstract }
 
 procedure TEntityAbstract.AfterCreate;
+begin
+end;
+
+procedure TEntityAbstract.AfterDelete;
+begin
+end;
+
+procedure TEntityAbstract.AfterInsert;
+begin
+end;
+
+procedure TEntityAbstract.AfterUpdate;
 begin
 end;
 
@@ -761,6 +778,8 @@ var
 begin
   SQL := GetDeleteSQL;
   ExecToDB(SQL);
+
+  AfterDelete;
 end;
 
 destructor TEntityAbstract.Destroy;
@@ -858,7 +877,7 @@ begin
       else
         aParam.AsFloat := aValue;
     end;
-    ftDateTime: aParam.AsDateTime := aValue;
+    ftDateTime, ftTimeStamp: aParam.AsDateTime := aValue;
     ftString, ftWideString, ftWideMemo, ftBoolean:
     begin
       if aValue = '' then
@@ -1251,6 +1270,8 @@ begin
       aBlob.MoveModifiedToInstance;
     end
   );
+
+  AfterInsert;
 end;
 
 function TEntityAbstract.PropExists(const aPropName: string): Boolean;
@@ -1354,7 +1375,9 @@ end;
 
 procedure TEntityAbstract.RemoveJoinedEntity(aValue: TEntityAbstract);
 begin
+  FRevertListProcs.Remove(aValue.Revert);
   FJoinedEntities.Remove(aValue);
+
   if aValue.Owner = Self then
     aValue.Free;
 end;
@@ -1496,6 +1519,8 @@ begin
 
   ExecToDB(SQL);
   AssignInstanceFromProps;
+
+  AfterUpdate;
 end;
 
 { TInstance }
@@ -2666,13 +2691,15 @@ end;
 
 { TEntityKeeper<T> }
 
-constructor TEntityKeeper<T>.Create(aEntity: T);
+constructor TEntityKeeper<T>.Create(aEntity: T; const aOwns: Boolean = False);
 var
   EntityFreeNotify: ISourceFreeNotification;
 begin
   FEntity := aEntity;
   FDBEngine := aEntity.FDBEngine;
   FPKeyValues := aEntity.GetPKeyValues;
+  if aOwns then
+    FIsEntityOwner := True;
 
   if aEntity.GetInterface(ISourceFreeNotification, EntityFreeNotify) then
     EntityFreeNotify.AddFreeNotify(EntityFreeNotification);
@@ -2689,6 +2716,12 @@ end;
 procedure TEntityKeeper<T>.EntityFreeNotification(Sender: TObject);
 begin
   FEntity := nil;
+end;
+
+function TEntityKeeper<T>.Transfer: T;
+begin
+  Result := GetOne;
+  FIsEntityOwner := False;
 end;
 
 function TEntityKeeper<T>.GetOne: T;
